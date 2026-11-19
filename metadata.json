@@ -1,0 +1,6 @@
+{
+  "name": "AICE Franchisee Hub",
+  "description": "Online stock-replenishment ordering, warehouse inventory, franchisee onboarding, and live delivery-tracking platform for the AICE ice cream franchise network.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
