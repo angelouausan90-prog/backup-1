@@ -8,6 +8,7 @@ export const AgentRecruitsView: React.FC<{ onNavigate: (path: string) => void }>
   onNavigate,
 }) => {
   const [rows, setRows] = useState<any[]>([]);
+  const [activePromos, setActivePromos] = useState<any[]>([]);
   const [summary, setSummary] = useState({ total: 0, approved: 0, pending: 0, rejected: 0 });
   const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
   const [search, setSearch] = useState('');
@@ -29,6 +30,13 @@ export const AgentRecruitsView: React.FC<{ onNavigate: (path: string) => void }>
     load(1);
   }, [search, statusFilter]);
 
+  useEffect(() => {
+    api
+      .get('/promos')
+      .then((res) => setActivePromos(res.data || []))
+      .catch(() => {});
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -45,6 +53,48 @@ export const AgentRecruitsView: React.FC<{ onNavigate: (path: string) => void }>
         >
           Register New Franchisee
         </button>
+      </div>
+
+      {/* READ-ONLY ACTIVE PROMOTIONS FOR AGENTS */}
+      <div className="bg-white border border-emerald-200 rounded-lg p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">
+              Active Promotions (Read-Only Reference for Your Franchisees)
+            </h2>
+            <p className="text-xs text-slate-600">
+              Share these ongoing AICE stock-replenishment offers with your recruited franchisees.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('/agent/promotions')}
+            className="text-xs font-semibold text-emerald-800 hover:underline"
+          >
+            Open Full Promotions Directory →
+          </button>
+        </div>
+        {activePromos.length === 0 ? (
+          <p className="text-xs text-slate-500">No active promotions right now.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {activePromos.map((p) => (
+              <div
+                key={p.id}
+                className="p-3 rounded-lg border border-emerald-200 bg-emerald-50/50 space-y-1"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-900">{p.name}</span>
+                  <span className="font-mono text-[11px] text-slate-600">
+                    Valid: {p.start_date} → {p.end_date}
+                  </span>
+                </div>
+                <div className="text-xs font-semibold text-emerald-900">{p.how_it_works}</div>
+                {p.description && <div className="text-xs text-slate-600">{p.description}</div>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
@@ -420,3 +470,83 @@ export const AgentCommissionsView: React.FC = () => {
     </div>
   );
 };
+
+// ===== 4. AGENT READ-ONLY ACTIVE PROMOTIONS VIEW =====
+export const AgentPromotionsView: React.FC = () => {
+  const [promos, setPromos] = useState<any[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    api
+      .get('/promos')
+      .then((res) => setPromos(res.data || []))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-bold text-slate-900">Active Franchisee Promotions (Read-Only)</h1>
+        <p className="text-sm text-slate-600">
+          Review active AICE stock-replenishment promotions so you can inform your recruited franchisees about eligible bulk discounts, free cartons, and seasonal deals.
+        </p>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg p-5">
+        {loading ? (
+          <p className="text-sm text-slate-500">Loading active promotions...</p>
+        ) : promos.length === 0 ? (
+          <p className="text-sm text-slate-500">No active promotions right now.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead>
+                <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500">
+                  <th className="py-2.5 pr-4">Promotion Name</th>
+                  <th className="py-2.5 pr-4">How It Works</th>
+                  <th className="py-2.5 pr-4">Scope</th>
+                  <th className="py-2.5 pr-4">Valid Period</th>
+                  <th className="py-2.5 text-right">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {promos.map((p) => (
+                  <tr key={p.id} className="hover:bg-slate-50">
+                    <td className="py-3 pr-4">
+                      <div className="font-semibold text-slate-900">{p.name}</div>
+                      {p.description && (
+                        <div className="text-xs text-slate-500">{p.description}</div>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4 text-xs font-semibold text-emerald-800">
+                      {p.how_it_works}
+                    </td>
+                    <td className="py-3 pr-4 text-xs text-slate-700">
+                      {p.scope === 'all_products'
+                        ? 'All Products'
+                        : p.scope === 'category'
+                        ? 'Selected Categories'
+                        : 'Selected Products'}
+                    </td>
+                    <td className="py-3 pr-4 font-mono text-xs text-slate-700">
+                      {p.start_date} → {p.end_date}
+                      {p.days_remaining !== null && p.days_remaining <= 7 && (
+                        <div className="text-[11px] font-sans font-bold text-amber-800">
+                          Ends in {p.days_remaining} day{p.days_remaining === 1 ? '' : 's'}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-3 text-right">
+                      <StatusText status={p.status} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+

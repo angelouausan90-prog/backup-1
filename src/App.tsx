@@ -3,6 +3,7 @@ import { api } from './services/api';
 import { RoleName, User } from './types';
 import { StoreMapView } from './components/StoreMapView';
 import { NotificationsView } from './components/NotificationsView';
+import { FranchiseePromoPopupModal } from './components/FranchiseePromoPopupModal';
 import {
   AdminDashboard,
   WarehouseSetupView,
@@ -13,6 +14,9 @@ import {
 } from './pages/admin/AdminCorePages';
 import {
   ProductsManagementView,
+  PromotionsManagementView,
+  DemandForecastingView,
+  SalesAnalyticsView,
   InventoryManagementView,
   AdminOrdersView,
   CommissionsManagementView,
@@ -22,6 +26,7 @@ import {
   AgentRecruitsView,
   RegisterFranchiseeView,
   AgentCommissionsView,
+  AgentPromotionsView,
 } from './pages/agent/AgentPages';
 import {
   FranchiseeDashboard,
@@ -49,6 +54,9 @@ const SIDEBAR_BY_ROLE: Record<RoleName, NavItem[]> = {
     { label: 'Franchisees', path: '/admin/franchisees' },
     { label: 'Delivery Staff', path: '/admin/delivery-staff' },
     { label: 'Products & Categories', path: '/admin/products' },
+    { label: 'Promotions', path: '/admin/promotions' },
+    { label: 'Demand Forecasting', path: '/admin/demand-forecast' },
+    { label: 'Sales Analytics', path: '/admin/sales-analytics' },
     { label: 'Warehouse Inventory', path: '/admin/inventory' },
     { label: 'Replenishment Orders', path: '/admin/orders' },
     { label: 'Agent Commissions', path: '/admin/commissions' },
@@ -59,6 +67,7 @@ const SIDEBAR_BY_ROLE: Record<RoleName, NavItem[]> = {
   agent: [
     { label: 'My Recruits', path: '/agent/dashboard' },
     { label: 'Register Franchisee', path: '/agent/register-franchisee' },
+    { label: 'Active Promotions', path: '/agent/promotions' },
     { label: 'My Commissions', path: '/agent/commissions' },
     { label: 'Store Map', path: '/agent/store-map' },
     { label: 'Notifications', path: '/agent/notifications' },
@@ -203,6 +212,7 @@ export default function App() {
       localStorage.setItem('aice_token', res.token);
       const u: User = res.user;
       const wh = Boolean(res.hasWarehouse);
+      sessionStorage.removeItem(`aice_promo_popup_shown_${u.id}`);
       setUser(u);
       setHasWarehouse(wh);
       setPassword('');
@@ -241,6 +251,9 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    if (user?.id) {
+      sessionStorage.removeItem(`aice_promo_popup_shown_${user.id}`);
+    }
     localStorage.removeItem('aice_token');
     setUser(null);
     setRoute('/login');
@@ -580,6 +593,12 @@ export default function App() {
         return <DeliveryStaffView />;
       case '/admin/products':
         return <ProductsManagementView />;
+      case '/admin/promotions':
+        return <PromotionsManagementView />;
+      case '/admin/demand-forecast':
+        return <DemandForecastingView />;
+      case '/admin/sales-analytics':
+        return <SalesAnalyticsView onNavigate={navigateTo} />;
       case '/admin/inventory':
         return <InventoryManagementView />;
       case '/admin/orders':
@@ -607,6 +626,8 @@ export default function App() {
         return <AgentRecruitsView onNavigate={navigateTo} />;
       case '/agent/register-franchisee':
         return <RegisterFranchiseeView />;
+      case '/agent/promotions':
+        return <AgentPromotionsView />;
       case '/agent/commissions':
         return <AgentCommissionsView />;
       case '/agent/store-map':
@@ -664,15 +685,15 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex bg-slate-50 text-slate-900">
+    <div className="h-screen overflow-hidden flex bg-slate-50 text-slate-900">
       {/* Role-Specific Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 w-64 bg-slate-900 text-slate-100 flex flex-col justify-between transition-transform lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-30 w-64 h-screen shrink-0 bg-slate-900 text-slate-100 flex flex-col justify-between overflow-hidden transition-transform lg:static lg:translate-x-0 ${
           mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="p-4 space-y-4 overflow-y-auto">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <div className="p-4 pb-3 border-b border-slate-800 flex items-center justify-between shrink-0">
             <div>
               <div className="text-base font-bold tracking-tight text-white">
                 AICE Franchisee Hub
@@ -690,7 +711,10 @@ export default function App() {
             </button>
           </div>
 
-          <nav aria-label="Role Navigation" className="space-y-1">
+          <nav
+            aria-label="Role Navigation"
+            className="flex-1 overflow-y-auto p-4 space-y-1"
+          >
             {navItems.map((item) => {
               const isLocked = !hasWarehouse && item.path !== '/admin/warehouses';
               const isActive = activeRoute === item.path;
@@ -720,7 +744,7 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="p-4 border-t border-slate-800 space-y-2">
+        <div className="p-4 border-t border-slate-800 space-y-2 shrink-0">
           <div className="text-xs font-semibold text-white truncate">
             {user.full_name}
           </div>
@@ -738,8 +762,8 @@ export default function App() {
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8">
+      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+        <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8 shrink-0">
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -766,10 +790,21 @@ export default function App() {
           </div>
         </header>
 
-        <main className="p-6 flex-1 max-w-7xl w-full mx-auto">
-          {renderMainContent()}
+        <main className="flex-1 overflow-y-auto p-6">
+          <div className="max-w-7xl w-full mx-auto">
+            {renderMainContent()}
+          </div>
         </main>
       </div>
+
+      {/* Post-Login Franchisee Promo Popup Modal (once per login session) */}
+      {user.role === 'franchisee' && hasWarehouse && !user.must_change_password && (
+        <FranchiseePromoPopupModal
+          userId={user.id}
+          hasWarehouse={hasWarehouse}
+          onShopNow={() => navigateTo('/franchisee/catalog')}
+        />
+      )}
     </div>
   );
 }

@@ -131,6 +131,16 @@ export const DeliveryAssignedView: React.FC = () => {
                       <span className="text-sm font-semibold text-slate-900">{d.store_name}</span>
                       <span className="text-slate-400">·</span>
                       <StatusText status={d.status} />
+                      <span className="text-slate-400">·</span>
+                      <span className="font-mono text-xs font-bold text-slate-900">
+                        Total: PHP {Number(d.total_amount || 0).toFixed(2)}
+                      </span>
+                      {Number(d.discount_amount || 0) > 0 && (
+                        <span className="font-mono text-xs text-emerald-700 font-semibold">
+                          (Promo {d.promo_name || 'Discount'}: -PHP{' '}
+                          {Number(d.discount_amount).toFixed(2)})
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-slate-600 mt-0.5">
                       Pickup Origin: <strong>{d.warehouse_name}</strong> ({d.warehouse_address})
@@ -173,7 +183,14 @@ export const DeliveryAssignedView: React.FC = () => {
                     <div key={it.id} className="flex items-center gap-2.5 text-xs">
                       <ProductImage imageUrl={it.image_url} alt={it.product_name} thumb />
                       <div>
-                        <div className="font-semibold text-slate-800">{it.product_name}</div>
+                        <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                          <span>{it.product_name}</span>
+                          {Boolean(it.is_free_item) && (
+                            <span className="text-[10px] font-bold text-emerald-700 uppercase">
+                              [FREE PROMO]
+                            </span>
+                          )}
+                        </div>
                         <div className="text-slate-500 font-mono">Qty: {it.quantity}</div>
                       </div>
                     </div>
@@ -271,6 +288,7 @@ export const DeliveryHistoryView: React.FC = () => {
               <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500">
                 <th className="py-2.5 pr-4">Order #</th>
                 <th className="py-2.5 pr-4">Store Destination</th>
+                <th className="py-2.5 pr-4 text-right">Order Total</th>
                 <th className="py-2.5 pr-4">Proof Note</th>
                 <th className="py-2.5 pr-4">Delivered At</th>
                 <th className="py-2.5 text-right">Status</th>
@@ -279,7 +297,7 @@ export const DeliveryHistoryView: React.FC = () => {
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-6 text-center text-sm text-slate-500">
+                  <td colSpan={6} className="py-6 text-center text-sm text-slate-500">
                     No completed deliveries yet.
                   </td>
                 </tr>
@@ -292,6 +310,16 @@ export const DeliveryHistoryView: React.FC = () => {
                     <td className="py-2.5 pr-4">
                       <div className="font-medium text-slate-900">{d.store_name}</div>
                       <div className="text-xs text-slate-500">{d.store_address}</div>
+                    </td>
+                    <td className="py-2.5 pr-4 text-right font-mono text-xs">
+                      <div className="font-semibold text-slate-900">
+                        PHP {Number(d.total_amount || 0).toFixed(2)}
+                      </div>
+                      {Number(d.discount_amount || 0) > 0 && (
+                        <div className="text-[11px] text-emerald-700">
+                          Promo: -PHP {Number(d.discount_amount).toFixed(2)}
+                        </div>
+                      )}
                     </td>
                     <td className="py-2.5 pr-4 text-xs text-slate-700">{d.proof_note || '—'}</td>
                     <td className="py-2.5 pr-4 font-mono text-xs text-slate-500">
@@ -311,3 +339,4 @@ export const DeliveryHistoryView: React.FC = () => {
     </div>
   );
 };
+

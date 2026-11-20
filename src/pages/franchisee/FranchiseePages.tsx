@@ -12,9 +12,14 @@ export const FranchiseeDashboard: React.FC<{
   onTrackOrder: (orderId: number) => void;
 }> = ({ user, onNavigate, onTrackOrder }) => {
   const [orders, setOrders] = useState<any[]>([]);
+  const [activePromos, setActivePromos] = useState<any[]>([]);
 
   useEffect(() => {
     api.get('/orders?limit=8').then((res) => setOrders(res.data));
+    api
+      .get('/promos')
+      .then((res) => setActivePromos(res.data || []))
+      .catch(() => {});
   }, []);
 
   const activeOrders = orders.filter(
@@ -39,6 +44,63 @@ export const FranchiseeDashboard: React.FC<{
         >
           Order Ice Cream Stock
         </button>
+      </div>
+
+      {/* ACTIVE PROMOTIONS BANNER / SECTION */}
+      <div className="bg-white border border-emerald-200 rounded-lg p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">
+              Active Stock-Replenishment Promotions
+            </h2>
+            <p className="text-xs text-slate-600">
+              Eligible discounts and free cartons are applied automatically in your replenishment cart.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('/franchisee/catalog')}
+            className="text-xs font-semibold text-emerald-800 hover:underline"
+          >
+            Shop With Active Promos →
+          </button>
+        </div>
+
+        {activePromos.length === 0 ? (
+          <div className="p-4 rounded-lg border border-dashed border-slate-200 text-xs text-slate-500">
+            No active promos right now. Check back soon for new replenishment discounts.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {activePromos.map((p) => (
+              <div
+                key={p.id}
+                className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50/60 flex flex-col justify-between gap-2"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold text-slate-900">{p.name}</span>
+                    {p.days_remaining !== null && p.days_remaining <= 7 && (
+                      <span className="font-mono text-[11px] font-bold text-amber-800">
+                        {p.days_remaining === 0
+                          ? 'Ends today!'
+                          : `Ends in ${p.days_remaining} day${p.days_remaining === 1 ? '' : 's'}`}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs font-semibold text-emerald-900">{p.how_it_works}</div>
+                  {p.description && <p className="text-xs text-slate-600">{p.description}</p>}
+                </div>
+                <div className="flex items-center justify-between pt-2 border-t border-emerald-200/70 text-[11px] text-slate-600">
+                  <span>
+                    Valid until: <strong className="font-mono text-slate-900">{p.end_date}</strong>
+                  </span>
+                  <span className="font-semibold text-emerald-800">Auto-Applied in Cart</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -93,6 +155,7 @@ export const FranchiseeDashboard: React.FC<{
                   <th className="py-2.5 pr-4">Order Number</th>
                   <th className="py-2.5 pr-4">Warehouse Origin</th>
                   <th className="py-2.5 pr-4">Status</th>
+                  <th className="py-2.5 pr-4 text-right">Promo Discount</th>
                   <th className="py-2.5 pr-4 text-right">Total</th>
                   <th className="py-2.5 text-right">Action</th>
                 </tr>
@@ -106,6 +169,11 @@ export const FranchiseeDashboard: React.FC<{
                     <td className="py-2.5 pr-4 text-slate-700">{o.warehouse_name}</td>
                     <td className="py-2.5 pr-4">
                       <StatusText status={o.status} />
+                    </td>
+                    <td className="py-2.5 pr-4 text-right font-mono text-xs text-emerald-700">
+                      {Number(o.discount_amount || 0) > 0
+                        ? `-PHP ${Number(o.discount_amount).toFixed(2)} (${o.promo_name || 'Promo'})`
+                        : '—'}
                     </td>
                     <td className="py-2.5 pr-4 text-right font-mono text-xs font-semibold">
                       PHP {Number(o.total_amount).toFixed(2)}
@@ -138,9 +206,11 @@ export const CatalogAndCartView: React.FC<{
   const [selectedWh, setSelectedWh] = useState<string>('');
   const [categories, setCategories] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
+  const [activePromos, setActivePromos] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [cart, setCart] = useState<Record<number, { product: any; quantity: number }>>({});
+  const [promoEvaluation, setPromoEvaluation] = useState<any>(null);
   const [deliveryDateTime, setDeliveryDateTime] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
@@ -153,6 +223,10 @@ export const CatalogAndCartView: React.FC<{
       if (active.length > 0) setSelectedWh(String(active[0].id));
     });
     api.get('/categories').then((res) => setCategories(res.data));
+    api
+      .get('/promos')
+      .then((res) => setActivePromos(res.data || []))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -163,6 +237,24 @@ export const CatalogAndCartView: React.FC<{
       )
       .then((res) => setProducts(res.data));
   }, [selectedWh, search, categoryId]);
+
+  const cartEntries = Object.values(cart);
+  const cartSubtotal = cartEntries.reduce(
+    (sum, e) => sum + Number(e.product.price) * e.quantity,
+    0
+  );
+
+  // Automatically evaluate eligible promos and upsell hints whenever cart changes
+  useEffect(() => {
+    const itemsPayload = Object.values(cart).map((c) => ({
+      product_id: c.product.id,
+      quantity: c.quantity,
+    }));
+    api
+      .post('/promos/evaluate-cart', { items: itemsPayload })
+      .then((res) => setPromoEvaluation(res?.data || res || null))
+      .catch(() => setPromoEvaluation(null));
+  }, [cart]);
 
   const addToCart = (product: any) => {
     const currentQty = cart[product.id]?.quantity || 0;
@@ -197,11 +289,11 @@ export const CatalogAndCartView: React.FC<{
     });
   };
 
-  const cartEntries = Object.values(cart);
-  const cartTotal = cartEntries.reduce(
-    (sum, e) => sum + Number(e.product.price) * e.quantity,
-    0
-  );
+  const discountAmount = Number(promoEvaluation?.discount_amount || 0);
+  const finalTotal =
+    promoEvaluation && cartEntries.length > 0
+      ? Number(promoEvaluation.final_total)
+      : cartSubtotal;
 
   const placeOrder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -260,6 +352,22 @@ export const CatalogAndCartView: React.FC<{
           </select>
         </div>
       </div>
+
+      {activePromos.length > 0 && (
+        <div className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50/70 space-y-1">
+          <div className="text-xs font-bold text-emerald-900">
+            Active Promotions ({activePromos.length}) — Automatically Applied at Checkout:
+          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-800">
+            {activePromos.map((p) => (
+              <span key={p.id}>
+                <strong className="text-emerald-900">{p.name}:</strong> {p.how_it_works}{' '}
+                <span className="font-mono text-[11px] text-slate-500">(until {p.end_date})</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="p-4 rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-800">
@@ -351,6 +459,20 @@ export const CatalogAndCartView: React.FC<{
             Replenishment Cart ({cartEntries.length})
           </h2>
 
+          {/* Upsell Hints */}
+          {Array.isArray(promoEvaluation?.hints) && promoEvaluation.hints.length > 0 && (
+            <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 space-y-1">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-900">
+                Promo Unlock Hint
+              </div>
+              {promoEvaluation.hints.map((hint: string, i: number) => (
+                <div key={i} className="text-xs font-medium text-amber-950">
+                  • {hint}
+                </div>
+              ))}
+            </div>
+          )}
+
           {cartEntries.length === 0 ? (
             <p className="text-xs text-slate-500">
               Your cart is empty. Select products on the left to build your order.
@@ -384,10 +506,98 @@ export const CatalogAndCartView: React.FC<{
             </div>
           )}
 
+          {/* Free Promo Items Granted (Buy X Get Y) */}
+          {Array.isArray(promoEvaluation?.free_items) &&
+            promoEvaluation.free_items.length > 0 && (
+              <div className="p-3 rounded-lg border border-emerald-200 bg-emerald-50 space-y-1.5">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-900">
+                  Free Promo Items Included
+                </div>
+                {promoEvaluation.free_items.map((fi: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className="flex items-center justify-between text-xs text-emerald-950"
+                  >
+                    <span>
+                      <strong>+{fi.quantity} FREE</strong> {fi.product_name}
+                    </span>
+                    <span className="font-mono font-semibold text-emerald-800">
+                      PHP 0.00 (Value PHP {(Number(fi.unit_price) * Number(fi.quantity)).toFixed(2)})
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
           <div className="pt-3 border-t border-slate-200 space-y-3">
-            <div className="flex items-center justify-between text-sm font-bold text-slate-900">
-              <span>Order Total</span>
-              <span className="font-mono">PHP {cartTotal.toFixed(2)}</span>
+            <div className="space-y-1.5 text-xs">
+              <div className="flex items-center justify-between text-slate-600">
+                <span>Subtotal</span>
+                <span className="font-mono">
+                  PHP{' '}
+                  {cartSubtotal.toLocaleString('en-PH', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+
+              {Array.isArray(promoEvaluation?.applied_promos) &&
+                promoEvaluation.applied_promos.length > 0 && (
+                  <div className="space-y-1">
+                    {promoEvaluation.applied_promos.map((ap: any) => (
+                      <div
+                        key={ap.promo_id}
+                        className="flex items-center justify-between text-emerald-700 font-semibold"
+                      >
+                        <span>Promo: {ap.name || ap.promo_name}</span>
+                        <span className="font-mono">
+                          {ap.free_items && ap.free_items.length > 0 && ap.discount_amount === 0
+                            ? 'FREE ITEMS'
+                            : `-PHP ${Number(ap.discount_amount).toLocaleString('en-PH', {
+                                minimumFractionDigits: 2,
+                                maximumFractionDigits: 2,
+                              })}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+              {discountAmount > 0 && (
+                <div className="flex items-center justify-between text-emerald-700 font-semibold">
+                  <span>Total Discount</span>
+                  <span className="font-mono">
+                    -PHP{' '}
+                    {discountAmount.toLocaleString('en-PH', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between text-slate-600">
+                <span>Delivery Fee</span>
+                <span className="font-mono">
+                  {promoEvaluation?.free_delivery_applied ? (
+                    <strong className="text-emerald-700">FREE DELIVERY</strong>
+                  ) : (
+                    'PHP 0.00'
+                  )}
+                </span>
+              </div>
+
+              <div className="pt-1.5 border-t border-slate-200 flex items-center justify-between text-sm font-bold text-slate-900">
+                <span>Final Total to Pay</span>
+                <span className="font-mono">
+                  PHP{' '}
+                  {finalTotal.toLocaleString('en-PH', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
             </div>
 
             <div>
@@ -459,10 +669,11 @@ export const FranchiseeOrdersView: React.FC<{
   const handleReorder = async (order: any) => {
     setError('');
     try {
+      const paidItems = (order.items || []).filter((it: any) => !it.is_free_item);
       const res = await api.post('/orders', {
         warehouse_id: order.warehouse_id,
         notes: `Reorder of ${order.order_number}`,
-        items: (order.items || []).map((it: any) => ({
+        items: paidItems.map((it: any) => ({
           product_id: it.product_id,
           quantity: it.quantity,
         })),
@@ -473,12 +684,22 @@ export const FranchiseeOrdersView: React.FC<{
     }
   };
 
+  const handleCancelOrder = async (orderId: number) => {
+    setError('');
+    try {
+      await api.post(`/orders/${orderId}/cancel`, { reason: 'Cancelled by franchisee' });
+      load(pagination.page);
+    } catch (err: any) {
+      setError(err.message || 'Could not cancel order.');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-bold text-slate-900">My Order History</h1>
         <p className="text-sm text-slate-600">
-          Review past replenishment orders, inspect ordered items with product photos, reorder in one click, or open Track My Order.
+          Review past replenishment orders, inspect applied promo discounts and free items, reorder in one click, or open Track My Order.
         </p>
       </div>
 
@@ -529,16 +750,43 @@ export const FranchiseeOrdersView: React.FC<{
                       </span>
                       <span className="text-slate-400">·</span>
                       <StatusText status={o.status} />
+                      {o.promo_name && (
+                        <>
+                          <span className="text-slate-400">·</span>
+                          <span className="text-xs font-semibold text-emerald-700">
+                            Promo: {o.promo_name}
+                          </span>
+                        </>
+                      )}
                     </div>
                     <div className="text-xs text-slate-500">
                       Origin: {o.warehouse_name} · Placed:{' '}
                       <span className="font-mono">{o.created_at}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm font-bold text-slate-900 mr-2">
-                      PHP {Number(o.total_amount).toFixed(2)}
-                    </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-right mr-2">
+                      {Number(o.discount_amount || 0) > 0 && (
+                        <div className="text-[11px] font-mono text-slate-500">
+                          Subtotal: PHP {Number(o.subtotal ?? o.total_amount).toFixed(2)} ·{' '}
+                          <span className="text-emerald-700 font-semibold">
+                            -PHP {Number(o.discount_amount).toFixed(2)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="font-mono text-sm font-bold text-slate-900">
+                        PHP {Number(o.total_amount).toFixed(2)}
+                      </div>
+                    </div>
+                    {o.status === 'Placed' && (
+                      <button
+                        type="button"
+                        onClick={() => handleCancelOrder(o.id)}
+                        className="px-3 py-1.5 rounded border border-rose-300 bg-white text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                      >
+                        Cancel Order
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => handleReorder(o)}
@@ -561,9 +809,29 @@ export const FranchiseeOrdersView: React.FC<{
                     <div key={it.id} className="flex items-center gap-2.5 text-xs">
                       <ProductImage imageUrl={it.image_url} alt={it.product_name} thumb />
                       <div>
-                        <div className="font-semibold text-slate-800">{it.product_name}</div>
+                        <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                          <span>{it.product_name}</span>
+                          {Boolean(it.is_free_item) && (
+                            <span className="text-[10px] font-bold text-emerald-700 uppercase">
+                              [FREE PROMO]
+                            </span>
+                          )}
+                        </div>
                         <div className="text-slate-500 font-mono">
-                          {it.quantity} x PHP {Number(it.unit_price).toFixed(2)}
+                          {Boolean(it.is_free_item) ? (
+                            <span className="text-emerald-700 font-semibold">
+                              {it.quantity} free box(es) · PHP 0.00
+                            </span>
+                          ) : (
+                            <>
+                              {it.quantity} x PHP {Number(it.unit_price).toFixed(2)}
+                              {Number(it.discount_amount || 0) > 0 && (
+                                <span className="text-emerald-700 ml-1">
+                                  (-PHP {Number(it.discount_amount).toFixed(2)})
+                                </span>
+                              )}
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -833,9 +1101,25 @@ export const TrackOrderView: React.FC<{
           </div>
 
           <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-3">
-            <h2 className="text-base font-semibold text-slate-900">
-              Ordered Products ({items.length}) · Total PHP {Number(order.total_amount).toFixed(2)}
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-slate-900">
+                Ordered Products ({items.length})
+              </h2>
+              <div className="text-right font-mono text-xs">
+                {Number(order.discount_amount || 0) > 0 && (
+                  <div className="text-slate-500">
+                    Subtotal: PHP {Number(order.subtotal ?? order.total_amount).toFixed(2)} ·{' '}
+                    <span className="text-emerald-700 font-semibold">
+                      Promo ({order.promo_name || 'Discount'}): -PHP{' '}
+                      {Number(order.discount_amount).toFixed(2)}
+                    </span>
+                  </div>
+                )}
+                <div className="text-sm font-bold text-slate-900">
+                  Final Total: PHP {Number(order.total_amount).toFixed(2)}
+                </div>
+              </div>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {items.map((it: any) => (
                 <div
@@ -844,13 +1128,33 @@ export const TrackOrderView: React.FC<{
                 >
                   <ProductImage imageUrl={it.image_url} alt={it.product_name} thumb />
                   <div>
-                    <div className="text-xs font-bold text-slate-900">{it.product_name}</div>
+                    <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                      <span>{it.product_name}</span>
+                      {Boolean(it.is_free_item) && (
+                        <span className="text-[10px] font-bold text-emerald-700 uppercase">
+                          [FREE PROMO]
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[11px] text-slate-500">
                       {it.flavor} · {it.size}
                     </div>
                     <div className="text-xs font-mono text-slate-800">
-                      {it.quantity} x PHP {Number(it.unit_price).toFixed(2)} = PHP{' '}
-                      {Number(it.subtotal).toFixed(2)}
+                      {Boolean(it.is_free_item) ? (
+                        <span className="text-emerald-700 font-semibold">
+                          {it.quantity} free box(es) · PHP 0.00
+                        </span>
+                      ) : (
+                        <>
+                          {it.quantity} x PHP {Number(it.unit_price).toFixed(2)} = PHP{' '}
+                          {Number(it.subtotal).toFixed(2)}
+                          {Number(it.discount_amount || 0) > 0 && (
+                            <span className="text-emerald-700 ml-1">
+                              (-PHP {Number(it.discount_amount).toFixed(2)})
+                            </span>
+                          )}
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>

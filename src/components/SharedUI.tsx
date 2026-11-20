@@ -60,6 +60,9 @@ export const StatusText: React.FC<{ status: string }> = ({ status }) => {
     Rejected: 'text-rose-700 font-semibold',
     Cancelled: 'text-slate-500 font-medium line-through',
     Inactive: 'text-slate-500 font-medium',
+    Draft: 'text-slate-600 font-semibold',
+    Paused: 'text-amber-700 font-semibold',
+    Expired: 'text-slate-500 font-medium',
   };
   return <span className={`text-xs ${colorMap[status] || 'text-slate-700 font-medium'}`}>{status}</span>;
 };

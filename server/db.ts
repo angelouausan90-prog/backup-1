@@ -233,7 +233,133 @@ export function initDatabase() {
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     );
+
+    CREATE TABLE IF NOT EXISTS promos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      promo_type TEXT NOT NULL,
+      tier_basis TEXT NOT NULL DEFAULT 'quantity',
+      discount_type TEXT NOT NULL DEFAULT 'percent',
+      discount_value REAL NOT NULL DEFAULT 0,
+      min_order_amount REAL NOT NULL DEFAULT 0,
+      min_quantity INTEGER NOT NULL DEFAULT 0,
+      buy_quantity INTEGER NOT NULL DEFAULT 0,
+      free_quantity INTEGER NOT NULL DEFAULT 0,
+      free_product_id INTEGER,
+      free_delivery INTEGER NOT NULL DEFAULT 0,
+      max_discount_cap REAL,
+      scope TEXT NOT NULL DEFAULT 'all_products',
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      recurring_monthly INTEGER NOT NULL DEFAULT 0,
+      usage_limit_total INTEGER,
+      usage_limit_per_franchisee INTEGER,
+      stackable INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'Draft',
+      created_by INTEGER,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_products (
+      promo_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      PRIMARY KEY (promo_id, product_id),
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_categories (
+      promo_id INTEGER NOT NULL,
+      category_id INTEGER NOT NULL,
+      PRIMARY KEY (promo_id, category_id),
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE,
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_tiers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promo_id INTEGER NOT NULL,
+      min_quantity_or_amount REAL NOT NULL,
+      discount_value REAL NOT NULL,
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_targets (
+      promo_id INTEGER NOT NULL,
+      franchisee_id INTEGER NOT NULL,
+      PRIMARY KEY (promo_id, franchisee_id),
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE,
+      FOREIGN KEY (franchisee_id) REFERENCES franchisees(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_redemptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promo_id INTEGER NOT NULL,
+      order_id INTEGER NOT NULL,
+      franchisee_id INTEGER NOT NULL,
+      discount_amount REAL NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE,
+      FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+      FOREIGN KEY (franchisee_id) REFERENCES franchisees(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_dismissals (
+      user_id INTEGER NOT NULL,
+      promo_id INTEGER NOT NULL,
+      dismissed_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, promo_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE
+    );
   `);
+
+  // Safe migrations on existing orders & order_items tables without resetting data
+  const orderCols = (db.prepare('PRAGMA table_info(orders)').all() as { name: string }[]).map(
+    (c) => c.name
+  );
+  if (!orderCols.includes('subtotal')) {
+    db.exec('ALTER TABLE orders ADD COLUMN subtotal REAL NOT NULL DEFAULT 0.00');
+    db.exec('UPDATE orders SET subtotal = total_amount WHERE subtotal = 0 AND total_amount > 0');
+  }
+  if (!orderCols.includes('discount_amount')) {
+    db.exec('ALTER TABLE orders ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0.00');
+  }
+  if (!orderCols.includes('delivery_fee')) {
+    db.exec('ALTER TABLE orders ADD COLUMN delivery_fee REAL NOT NULL DEFAULT 0.00');
+  }
+  if (!orderCols.includes('promo_id')) {
+    db.exec('ALTER TABLE orders ADD COLUMN promo_id INTEGER');
+  }
+  if (!orderCols.includes('applied_promos_json')) {
+    db.exec('ALTER TABLE orders ADD COLUMN applied_promos_json TEXT');
+  }
+
+  const orderItemCols = (
+    db.prepare('PRAGMA table_info(order_items)').all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!orderItemCols.includes('discount_amount')) {
+    db.exec('ALTER TABLE order_items ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0.00');
+  }
+  if (!orderItemCols.includes('is_free_item')) {
+    db.exec('ALTER TABLE order_items ADD COLUMN is_free_item INTEGER NOT NULL DEFAULT 0');
+  }
+
+  const promoCols = (
+    db.prepare('PRAGMA table_info(promos)').all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!promoCols.includes('tier_basis')) {
+    db.exec("ALTER TABLE promos ADD COLUMN tier_basis TEXT NOT NULL DEFAULT 'quantity'");
+  }
+  if (!promoCols.includes('free_product_id')) {
+    db.exec('ALTER TABLE promos ADD COLUMN free_product_id INTEGER');
+  }
+  if (!promoCols.includes('recurring_monthly')) {
+    db.exec('ALTER TABLE promos ADD COLUMN recurring_monthly INTEGER NOT NULL DEFAULT 0');
+  }
 
   // Seed roles (mirrors database/seed.sql)
   const insertRole = db.prepare('INSERT OR IGNORE INTO roles (id, name) VALUES (?, ?)');

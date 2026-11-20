@@ -15,6 +15,17 @@ import {
   isValidCoords,
   requiresForcedPasswordChange,
   computeStockTransition,
+  calculateDemandForecast,
+  computeSalesKpiSummary,
+  validatePromoPayload,
+  formatPromoHowItWorks,
+  evaluatePromosForCart,
+  isPromoDateValid,
+  isPromoEligibleForFranchisee,
+  filterEligiblePopupPromos,
+  formatPromoLimitNote,
+  hasPromoRulesOrDatesChanged,
+  PromoDefinition,
 } from './src/utils/domainRules';
 
 // Initialize schema, seed.sql, and seed_test.sql accounts
@@ -584,7 +595,7 @@ async function startServer() {
                 COALESCE(SUM(CASE WHEN status = 'Placed' THEN 1 ELSE 0 END), 0) AS pending_orders,
                 COALESCE(SUM(CASE WHEN status IN ('Out for Delivery', 'Near / Arrived') THEN 1 ELSE 0 END), 0) AS in_transit,
                 COALESCE(SUM(CASE WHEN status = 'Delivered' THEN 1 ELSE 0 END), 0) AS delivered_orders,
-                COALESCE(SUM(CASE WHEN status NOT IN ('Cancelled', 'Rejected') THEN total_amount ELSE 0 END), 0) AS total_sales
+                COALESCE(SUM(CASE WHEN status IN ('Confirmed', 'Preparing', 'Assigned to Delivery', 'Out for Delivery', 'Near / Arrived', 'Delivered') THEN total_amount ELSE 0 END), 0) AS total_sales
          FROM orders`
       )
       .get() as any;
@@ -624,6 +635,350 @@ async function startServer() {
     });
   });
 
+  // ===== SALES ANALYTICS (Admin Only — Real SQLite Data) =====
+  api.get('/analytics/sales', authorize('admin'), requireWarehouse, (req, res) => {
+    const rangeParam = String(req.query.range || '30d');
+    const range = ['7d', '30d', 'month', 'custom'].includes(rangeParam) ? rangeParam : '30d';
+    const warehouseId = Number(req.query.warehouse_id) || null;
+    const categoryId = Number(req.query.category_id) || null;
+
+    let startDate = '';
+    let endDate = '';
+    let prevStartDate = '';
+    let prevEndDate = '';
+    let groupBy: 'day' | 'week' | 'month' = 'day';
+
+    if (range === '7d') {
+      const d = db
+        .prepare(
+          `SELECT date('now', '-6 days') AS s,
+                  date('now') AS e,
+                  date('now', '-13 days') AS ps,
+                  date('now', '-7 days') AS pe`
+        )
+        .get() as any;
+      startDate = d.s;
+      endDate = d.e;
+      prevStartDate = d.ps;
+      prevEndDate = d.pe;
+      groupBy = 'day';
+    } else if (range === 'month') {
+      const d = db
+        .prepare(
+          `SELECT date('now', 'start of month') AS s,
+                  date('now') AS e,
+                  date('now', 'start of month', '-1 month') AS ps,
+                  date('now', 'start of month', '-1 day') AS pe`
+        )
+        .get() as any;
+      startDate = d.s;
+      endDate = d.e;
+      prevStartDate = d.ps;
+      prevEndDate = d.pe;
+      groupBy = 'day';
+    } else if (range === 'custom' && req.query.from && req.query.to) {
+      const rawFrom = String(req.query.from).trim();
+      const rawTo = String(req.query.to).trim();
+      const d = db
+        .prepare(
+          `SELECT date(?) AS s,
+                  date(?) AS e,
+                  CAST(MAX(1, ROUND(julianday(date(?)) - julianday(date(?)) + 1)) AS INTEGER) AS span`
+        )
+        .get(rawFrom, rawTo, rawTo, rawFrom) as any;
+      startDate = d?.s || rawFrom;
+      endDate = d?.e || rawTo;
+      const span = Number(d?.span || 30);
+      const prev = db
+        .prepare(
+          `SELECT date(?, '-' || ? || ' days') AS ps,
+                  date(?, '-1 day') AS pe`
+        )
+        .get(startDate, span, startDate) as any;
+      prevStartDate = prev.ps;
+      prevEndDate = prev.pe;
+      groupBy = span > 90 ? 'month' : span > 35 ? 'week' : 'day';
+    } else {
+      // Default: 30d
+      const d = db
+        .prepare(
+          `SELECT date('now', '-29 days') AS s,
+                  date('now') AS e,
+                  date('now', '-59 days') AS ps,
+                  date('now', '-30 days') AS pe`
+        )
+        .get() as any;
+      startDate = d.s;
+      endDate = d.e;
+      prevStartDate = d.ps;
+      prevEndDate = d.pe;
+      groupBy = 'day';
+    }
+
+    const REVENUE_STATUS_SQL =
+      "('Confirmed', 'Preparing', 'Assigned to Delivery', 'Out for Delivery', 'Near / Arrived', 'Delivered')";
+
+    const whClause = warehouseId ? ` AND o.warehouse_id = ${Number(warehouseId)}` : '';
+    const catExistsClause = categoryId
+      ? ` AND EXISTS (
+            SELECT 1 FROM order_items oi
+            JOIN products p ON p.id = oi.product_id
+            WHERE oi.order_id = o.id AND p.category_id = ${Number(categoryId)}
+          )`
+      : '';
+    const orderRevenueExpr = categoryId
+      ? `COALESCE((
+            SELECT SUM(oi.subtotal)
+            FROM order_items oi
+            JOIN products p ON p.id = oi.product_id
+            WHERE oi.order_id = o.id AND p.category_id = ${Number(categoryId)}
+          ), 0)`
+      : 'o.total_amount';
+
+    const queryPeriodMetrics = (pStart: string, pEnd: string) => {
+      return db
+        .prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN ${orderRevenueExpr} ELSE 0 END), 0) AS total_revenue,
+             COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN 1 ELSE 0 END), 0) AS counted_orders,
+             COUNT(*) AS total_orders,
+             COALESCE(SUM(CASE WHEN o.status = 'Delivered' THEN 1 ELSE 0 END), 0) AS delivered_orders,
+             COALESCE(SUM(CASE WHEN o.status IN ('Cancelled', 'Rejected') THEN 1 ELSE 0 END), 0) AS cancelled_orders
+           FROM orders o
+           WHERE date(o.created_at) >= date(?)
+             AND date(o.created_at) <= date(?)
+             ${whClause}
+             ${catExistsClause}`
+        )
+        .get(pStart, pEnd) as any;
+    };
+
+    const currentRaw = queryPeriodMetrics(startDate, endDate);
+    const previousRaw = queryPeriodMetrics(prevStartDate, prevEndDate);
+    const kpis = computeSalesKpiSummary(currentRaw, previousRaw);
+
+    // 3. Revenue Over Time (using SQLite strftime)
+    const strftimeFmt =
+      groupBy === 'month' ? '%Y-%m' : groupBy === 'week' ? '%Y-W%W' : '%Y-%m-%d';
+
+    const revenueOverTime = db
+      .prepare(
+        `SELECT
+           strftime('${strftimeFmt}', o.created_at) AS period_label,
+           COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN ${orderRevenueExpr} ELSE 0 END), 0) AS revenue,
+           COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN 1 ELSE 0 END), 0) AS counted_orders,
+           COUNT(*) AS total_orders
+         FROM orders o
+         WHERE date(o.created_at) >= date(?)
+           AND date(o.created_at) <= date(?)
+           ${whClause}
+           ${catExistsClause}
+         GROUP BY strftime('${strftimeFmt}', o.created_at)
+         ORDER BY period_label ASC`
+      )
+      .all(startDate, endDate) as any[];
+
+    // 4. Top 5 Products by Revenue and by Boxes Sold (from Confirmed/Delivered orders)
+    const itemCatClause = categoryId ? ` AND p.category_id = ${Number(categoryId)}` : '';
+    const productSalesRows = db
+      .prepare(
+        `SELECT
+           p.id AS product_id,
+           p.sku,
+           p.name,
+           p.flavor,
+           p.size,
+           p.image_url,
+           c.name AS category_name,
+           COALESCE(SUM(oi.quantity), 0) AS boxes_sold,
+           COALESCE(SUM(oi.subtotal), 0) AS revenue,
+           COUNT(DISTINCT o.id) AS order_count
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         JOIN products p ON p.id = oi.product_id
+         JOIN categories c ON c.id = p.category_id
+         WHERE o.status IN ${REVENUE_STATUS_SQL}
+           AND date(o.created_at) >= date(?)
+           AND date(o.created_at) <= date(?)
+           ${whClause}
+           ${itemCatClause}
+         GROUP BY p.id
+         HAVING boxes_sold > 0 OR revenue > 0`
+      )
+      .all(startDate, endDate) as any[];
+
+    const topProductsByRevenue = [...productSalesRows]
+      .sort((a, b) => Number(b.revenue) - Number(a.revenue) || Number(b.boxes_sold) - Number(a.boxes_sold))
+      .slice(0, 5);
+
+    const topProductsByBoxes = [...productSalesRows]
+      .sort((a, b) => Number(b.boxes_sold) - Number(a.boxes_sold) || Number(b.revenue) - Number(a.revenue))
+      .slice(0, 5);
+
+    // 5. Sales by Category
+    const categoryRows = db
+      .prepare(
+        `SELECT
+           c.id AS category_id,
+           c.name AS category_name,
+           COALESCE(SUM(oi.quantity), 0) AS boxes_sold,
+           COALESCE(SUM(oi.subtotal), 0) AS revenue,
+           COUNT(DISTINCT o.id) AS order_count
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         JOIN products p ON p.id = oi.product_id
+         JOIN categories c ON c.id = p.category_id
+         WHERE o.status IN ${REVENUE_STATUS_SQL}
+           AND date(o.created_at) >= date(?)
+           AND date(o.created_at) <= date(?)
+           ${whClause}
+           ${itemCatClause}
+         GROUP BY c.id
+         ORDER BY revenue DESC`
+      )
+      .all(startDate, endDate) as any[];
+
+    const totalCatRevenue = categoryRows.reduce((s, r) => s + Number(r.revenue || 0), 0);
+    const salesByCategory = categoryRows.map((r) => ({
+      ...r,
+      revenue: Number(r.revenue || 0),
+      boxes_sold: Number(r.boxes_sold || 0),
+      share_pct:
+        totalCatRevenue > 0
+          ? Number(((Number(r.revenue || 0) / totalCatRevenue) * 100).toFixed(1))
+          : 0,
+    }));
+
+    // 6. Top Franchisees by Order Value and Number of Orders
+    const franchiseeRows = db
+      .prepare(
+        `SELECT
+           f.id AS franchisee_id,
+           f.store_name,
+           f.owner_name,
+           f.address,
+           u.username,
+           COUNT(o.id) AS total_orders,
+           COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN 1 ELSE 0 END), 0) AS counted_orders,
+           COALESCE(SUM(CASE WHEN o.status = 'Delivered' THEN 1 ELSE 0 END), 0) AS delivered_orders,
+           COALESCE(SUM(CASE WHEN o.status IN ${REVENUE_STATUS_SQL} THEN ${orderRevenueExpr} ELSE 0 END), 0) AS order_value
+         FROM franchisees f
+         JOIN users u ON u.id = f.user_id
+         JOIN orders o ON o.franchisee_id = f.id
+         WHERE date(o.created_at) >= date(?)
+           AND date(o.created_at) <= date(?)
+           ${whClause}
+           ${catExistsClause}
+         GROUP BY f.id
+         ORDER BY order_value DESC, total_orders DESC
+         LIMIT 10`
+      )
+      .all(startDate, endDate) as any[];
+
+    const topFranchisees = franchiseeRows.map((row, index) => ({
+      ...row,
+      rank: index + 1,
+      order_value: Number(row.order_value || 0),
+      total_orders: Number(row.total_orders || 0),
+      counted_orders: Number(row.counted_orders || 0),
+      delivered_orders: Number(row.delivered_orders || 0),
+    }));
+
+    // 7. Agent Performance (all agents, with recruits count, approved franchisees, and total order value from their franchisees in the period)
+    const agentRows = db
+      .prepare(
+        `SELECT
+           a.id AS agent_id,
+           u.full_name AS agent_name,
+           u.username AS agent_username,
+           u.contact_number,
+           (SELECT COUNT(*) FROM franchisees f WHERE f.agent_id = a.id) AS recruits_count,
+           (SELECT COUNT(*) FROM franchisees f WHERE f.agent_id = a.id AND f.status = 'Approved') AS approved_franchisees,
+           COALESCE((
+             SELECT COUNT(o.id)
+             FROM orders o
+             JOIN franchisees f ON f.id = o.franchisee_id
+             WHERE f.agent_id = a.id
+               AND o.status IN ${REVENUE_STATUS_SQL}
+               AND date(o.created_at) >= date(?)
+               AND date(o.created_at) <= date(?)
+               ${whClause}
+               ${catExistsClause}
+           ), 0) AS counted_orders,
+           COALESCE((
+             SELECT SUM(${orderRevenueExpr})
+             FROM orders o
+             JOIN franchisees f ON f.id = o.franchisee_id
+             WHERE f.agent_id = a.id
+               AND o.status IN ${REVENUE_STATUS_SQL}
+               AND date(o.created_at) >= date(?)
+               AND date(o.created_at) <= date(?)
+               ${whClause}
+               ${catExistsClause}
+           ), 0) AS total_order_value
+         FROM agents a
+         JOIN users u ON u.id = a.user_id
+         ORDER BY total_order_value DESC, approved_franchisees DESC, a.id ASC`
+      )
+      .all(startDate, endDate, startDate, endDate) as any[];
+
+    // 8. Orders by Status (including delivery completion stats)
+    const statusRows = db
+      .prepare(
+        `SELECT
+           o.status,
+           COUNT(o.id) AS order_count,
+           COALESCE(SUM(${orderRevenueExpr}), 0) AS status_amount,
+           COUNT(d.id) AS assigned_deliveries
+         FROM orders o
+         LEFT JOIN deliveries d ON d.order_id = o.id
+         WHERE date(o.created_at) >= date(?)
+           AND date(o.created_at) <= date(?)
+           ${whClause}
+           ${catExistsClause}
+         GROUP BY o.status
+         ORDER BY order_count DESC`
+      )
+      .all(startDate, endDate) as any[];
+
+    const totalStatusOrders = statusRows.reduce((s, r) => s + Number(r.order_count || 0), 0);
+    const ordersByStatus = statusRows.map((r) => ({
+      status: r.status,
+      order_count: Number(r.order_count || 0),
+      status_amount: Number(r.status_amount || 0),
+      assigned_deliveries: Number(r.assigned_deliveries || 0),
+      share_pct:
+        totalStatusOrders > 0
+          ? Number(((Number(r.order_count || 0) / totalStatusOrders) * 100).toFixed(1))
+          : 0,
+    }));
+
+    res.json({
+      period: {
+        range,
+        startDate,
+        endDate,
+        prevStartDate,
+        prevEndDate,
+        groupBy,
+      },
+      kpis,
+      revenueOverTime,
+      topProductsByRevenue,
+      topProductsByBoxes,
+      salesByCategory,
+      topFranchisees,
+      agentPerformance: agentRows.map((a) => ({
+        ...a,
+        recruits_count: Number(a.recruits_count || 0),
+        approved_franchisees: Number(a.approved_franchisees || 0),
+        counted_orders: Number(a.counted_orders || 0),
+        total_order_value: Number(a.total_order_value || 0),
+      })),
+      ordersByStatus,
+    });
+  });
+
   api.get('/admin/reports/sales', authorize('admin'), requireWarehouse, (req, res) => {
     const { from, to } = req.query;
     const params: any[] = [];
@@ -639,7 +994,15 @@ async function startServer() {
 
     const rows = db
       .prepare(
-        `SELECT o.order_number, o.created_at AS order_date, f.store_name, w.name AS warehouse_name, o.status, o.total_amount
+        `SELECT o.order_number,
+                o.created_at AS order_date,
+                f.store_name,
+                w.name AS warehouse_name,
+                o.status,
+                COALESCE(o.subtotal, o.total_amount) AS subtotal,
+                COALESCE(o.discount_amount, 0) AS discount_amount,
+                (SELECT pr.name FROM promos pr WHERE pr.id = o.promo_id) AS promo_name,
+                o.total_amount
          FROM orders o
          JOIN franchisees f ON f.id = o.franchisee_id
          JOIN warehouses w ON w.id = o.warehouse_id
@@ -649,7 +1012,8 @@ async function startServer() {
       .all(...params) as any[];
 
     const totalSales = rows.reduce((sum, r) => sum + Number(r.total_amount || 0), 0);
-    res.json({ data: rows, summary: { count: rows.length, totalSales } });
+    const totalDiscount = rows.reduce((sum, r) => sum + Number(r.discount_amount || 0), 0);
+    res.json({ data: rows, summary: { count: rows.length, totalSales, totalDiscount } });
   });
 
   api.get('/admin/reports/inventory', authorize('admin'), requireWarehouse, (req, res) => {
@@ -673,6 +1037,144 @@ async function startServer() {
       )
       .all(...params);
     res.json({ data: rows });
+  });
+
+  // ===== ADMIN: DEMAND FORECASTING (Based on Franchisee Most-Ordered Products) =====
+  api.get('/admin/demand-forecast', authorize('admin'), requireWarehouse, (req, res) => {
+    const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : null;
+    const categoryId = req.query.category_id ? Number(req.query.category_id) : null;
+    const horizon: 7 | 30 = req.query.horizon === '7' ? 7 : 30;
+
+    const whFilterOrder = warehouseId ? `AND o.warehouse_id = ${warehouseId}` : '';
+    const whFilterInv = warehouseId ? `AND i.warehouse_id = ${warehouseId}` : '';
+    const catFilter = categoryId ? `AND p.category_id = ${categoryId}` : '';
+
+    const rawProducts = db
+      .prepare(
+        `SELECT
+           p.id AS product_id,
+           p.sku,
+           p.name,
+           p.flavor,
+           p.size,
+           p.price,
+           p.image_url,
+           p.low_stock_threshold,
+           c.name AS category_name,
+           COALESCE((SELECT SUM(i.quantity) FROM inventory i WHERE i.product_id = p.id ${whFilterInv}), 0) AS current_stock,
+           COALESCE((
+             SELECT SUM(oi.quantity)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               ${whFilterOrder}
+           ), 0) AS total_ordered_qty,
+           COALESCE((
+             SELECT COUNT(DISTINCT o.id)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               ${whFilterOrder}
+           ), 0) AS order_count,
+           COALESCE((
+             SELECT COUNT(DISTINCT o.franchisee_id)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               ${whFilterOrder}
+           ), 0) AS unique_franchisees,
+           COALESCE((
+             SELECT SUM(oi.quantity)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               AND date(o.created_at) >= date('now', '-7 days')
+               ${whFilterOrder}
+           ), 0) AS recent_7d_qty,
+           COALESCE((
+             SELECT SUM(oi.quantity)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               AND date(o.created_at) < date('now', '-7 days')
+               AND date(o.created_at) >= date('now', '-14 days')
+               ${whFilterOrder}
+           ), 0) AS prev_7d_qty,
+           COALESCE((
+             SELECT SUM(oi.quantity)
+             FROM order_items oi
+             JOIN orders o ON o.id = oi.order_id
+             WHERE oi.product_id = p.id
+               AND o.status NOT IN ('Cancelled', 'Rejected')
+               AND date(o.created_at) >= date('now', '-30 days')
+               ${whFilterOrder}
+           ), 0) AS recent_30d_qty
+         FROM products p
+         JOIN categories c ON c.id = p.category_id
+         WHERE p.is_active = 1 ${catFilter}`
+      )
+      .all() as any[];
+
+    const forecastRows = calculateDemandForecast(rawProducts, horizon);
+
+    // Top franchisee store contributors per product
+    const topFranchiseesByProduct = db
+      .prepare(
+        `SELECT
+           oi.product_id,
+           f.store_name,
+           SUM(oi.quantity) AS store_qty,
+           COUNT(DISTINCT o.id) AS store_orders
+         FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         JOIN franchisees f ON f.id = o.franchisee_id
+         WHERE o.status NOT IN ('Cancelled', 'Rejected')
+           ${whFilterOrder}
+         GROUP BY oi.product_id, f.id
+         ORDER BY store_qty DESC`
+      )
+      .all() as any[];
+
+    const storeMap: Record<number, { store_name: string; store_qty: number; store_orders: number }[]> = {};
+    for (const row of topFranchiseesByProduct) {
+      if (!storeMap[row.product_id]) storeMap[row.product_id] = [];
+      if (storeMap[row.product_id].length < 3) {
+        storeMap[row.product_id].push({
+          store_name: row.store_name,
+          store_qty: Number(row.store_qty),
+          store_orders: Number(row.store_orders),
+        });
+      }
+    }
+
+    const enrichedRows = forecastRows.map((item) => ({
+      ...item,
+      top_stores: storeMap[item.product_id] || [],
+    }));
+
+    const totalOrderedUnits = enrichedRows.reduce((s, r) => s + r.total_ordered_qty, 0);
+    const totalProjectedUnits = enrichedRows.reduce(
+      (s, r) => s + (horizon === 7 ? r.forecast_next_7d : r.forecast_next_30d),
+      0
+    );
+    const totalRecommendedRestock = enrichedRows.reduce((s, r) => s + r.recommended_restock, 0);
+
+    res.json({
+      horizon,
+      data: enrichedRows,
+      summary: {
+        totalProducts: enrichedRows.length,
+        totalOrderedUnits,
+        totalProjectedUnits,
+        totalRecommendedRestock,
+        topProduct: enrichedRows[0] || null,
+      },
+    });
   });
 
   api.get('/admin/activity-logs', authorize('admin'), requireWarehouse, (req, res) => {
@@ -1647,7 +2149,737 @@ async function startServer() {
     });
   });
 
-  // ===== ORDERS (Franchisee & Admin) =====
+  // ===== PROMOTIONS (Admin CRUD, Franchisee & Agent Active List, Server-Side Cart Evaluation) =====
+  const getTodaySqlDate = (): string => {
+    const row = db.prepare("SELECT date('now') AS d").get() as { d: string };
+    return row.d;
+  };
+
+  const notifyTargetedFranchiseesForPromo = (
+    promoId: number,
+    title: string,
+    message: string
+  ) => {
+    const targets = db
+      .prepare('SELECT franchisee_id FROM promo_targets WHERE promo_id = ?')
+      .all(promoId) as { franchisee_id: number }[];
+
+    let franchiseeUsers: { user_id: number }[] = [];
+    if (targets.length === 0) {
+      franchiseeUsers = db
+        .prepare("SELECT user_id FROM franchisees WHERE status = 'Approved'")
+        .all() as { user_id: number }[];
+    } else {
+      const ids = targets.map((t) => Number(t.franchisee_id));
+      const placeholders = ids.map(() => '?').join(',');
+      franchiseeUsers = db
+        .prepare(
+          `SELECT user_id FROM franchisees WHERE status = 'Approved' AND id IN (${placeholders})`
+        )
+        .all(...ids) as { user_id: number }[];
+    }
+
+    for (const fu of franchiseeUsers) {
+      notifyUser(fu.user_id, title, message, 'promo', promoId);
+    }
+  };
+
+  const syncPromosLifecycle = () => {
+    // 1. Auto-expire non-recurring promos whose end_date has passed
+    db.prepare(
+      `UPDATE promos
+       SET status = 'Expired', updated_at = datetime('now')
+       WHERE status IN ('Active', 'Paused')
+         AND COALESCE(recurring_monthly, 0) = 0
+         AND date(end_date) < date('now')`
+    ).run();
+
+    // 2. Send 3-day-before-end reminder notification once per targeted franchisee
+    const endingSoon = db
+      .prepare(
+        `SELECT id, name, end_date,
+                CAST(ROUND(julianday(date(end_date)) - julianday(date('now'))) AS INTEGER) AS days_left
+         FROM promos
+         WHERE status = 'Active'
+           AND julianday(date(end_date)) - julianday(date('now')) BETWEEN 0 AND 3`
+      )
+      .all() as { id: number; name: string; end_date: string; days_left: number }[];
+
+    for (const p of endingSoon) {
+      const targets = db
+        .prepare('SELECT franchisee_id FROM promo_targets WHERE promo_id = ?')
+        .all(p.id) as { franchisee_id: number }[];
+
+      let franchiseeUsers: { user_id: number }[] = [];
+      if (targets.length === 0) {
+        franchiseeUsers = db
+          .prepare("SELECT user_id FROM franchisees WHERE status = 'Approved'")
+          .all() as { user_id: number }[];
+      } else {
+        const ids = targets.map((t) => Number(t.franchisee_id));
+        const placeholders = ids.map(() => '?').join(',');
+        franchiseeUsers = db
+          .prepare(
+            `SELECT user_id FROM franchisees WHERE status = 'Approved' AND id IN (${placeholders})`
+          )
+          .all(...ids) as { user_id: number }[];
+      }
+
+      const reminderTitle = `Promo Ending Soon: ${p.name}`;
+      for (const fu of franchiseeUsers) {
+        const alreadySent = db
+          .prepare(
+            "SELECT id FROM notifications WHERE user_id = ? AND type = 'promo' AND related_id = ? AND title = ?"
+          )
+          .get(fu.user_id, p.id, reminderTitle);
+        if (!alreadySent) {
+          const dayText =
+            p.days_left <= 0
+              ? 'ends today'
+              : `ends in ${p.days_left} day${p.days_left === 1 ? '' : 's'} (${p.end_date})`;
+          notifyUser(
+            fu.user_id,
+            reminderTitle,
+            `Reminder: "${p.name}" ${dayText}. Place your replenishment order before it expires!`,
+            'promo',
+            p.id
+          );
+        }
+      }
+    }
+  };
+
+  const loadHydratedPromos = (franchiseeId?: number): (PromoDefinition & Record<string, any>)[] => {
+    syncPromosLifecycle();
+    const rawPromos = db
+      .prepare(
+        `SELECT p.*,
+                (SELECT COUNT(*) FROM promo_redemptions pr WHERE pr.promo_id = p.id) AS total_redemptions,
+                COALESCE((SELECT SUM(pr.discount_amount) FROM promo_redemptions pr WHERE pr.promo_id = p.id), 0) AS total_discount_given,
+                CAST(ROUND(julianday(date(p.end_date)) - julianday(date('now'))) AS INTEGER) AS days_remaining
+         FROM promos p
+         ORDER BY p.id DESC`
+      )
+      .all() as any[];
+
+    return rawPromos.map((p) => {
+      const productRows = db
+        .prepare(
+          `SELECT pp.product_id, pr.name AS product_name, pr.sku
+           FROM promo_products pp
+           JOIN products pr ON pr.id = pp.product_id
+           WHERE pp.promo_id = ?`
+        )
+        .all(p.id) as any[];
+
+      const categoryRows = db
+        .prepare(
+          `SELECT pc.category_id, c.name AS category_name
+           FROM promo_categories pc
+           JOIN categories c ON c.id = pc.category_id
+           WHERE pc.promo_id = ?`
+        )
+        .all(p.id) as any[];
+
+      const tiers = db
+        .prepare(
+          `SELECT min_quantity_or_amount, discount_value
+           FROM promo_tiers
+           WHERE promo_id = ?
+           ORDER BY min_quantity_or_amount ASC`
+        )
+        .all(p.id) as { min_quantity_or_amount: number; discount_value: number }[];
+
+      const targetRows = db
+        .prepare(
+          `SELECT pt.franchisee_id, f.store_name, f.owner_name
+           FROM promo_targets pt
+           JOIN franchisees f ON f.id = pt.franchisee_id
+           WHERE pt.promo_id = ?`
+        )
+        .all(p.id) as any[];
+
+      let franchiseeRedemptions = 0;
+      if (franchiseeId) {
+        const frRow = db
+          .prepare(
+            'SELECT COUNT(*) AS cnt FROM promo_redemptions WHERE promo_id = ? AND franchisee_id = ?'
+          )
+          .get(p.id, franchiseeId) as { cnt: number };
+        franchiseeRedemptions = frRow.cnt;
+      }
+
+      const def: PromoDefinition & Record<string, any> = {
+        ...p,
+        discount_value: Number(p.discount_value || 0),
+        min_order_amount: Number(p.min_order_amount || 0),
+        min_quantity: Number(p.min_quantity || 0),
+        buy_quantity: Number(p.buy_quantity || 0),
+        free_quantity: Number(p.free_quantity || 0),
+        free_delivery: Number(p.free_delivery || 0),
+        max_discount_cap: p.max_discount_cap !== null ? Number(p.max_discount_cap) : null,
+        recurring_monthly: Number(p.recurring_monthly || 0),
+        usage_limit_total: p.usage_limit_total !== null ? Number(p.usage_limit_total) : null,
+        usage_limit_per_franchisee:
+          p.usage_limit_per_franchisee !== null ? Number(p.usage_limit_per_franchisee) : null,
+        stackable: Number(p.stackable || 0),
+        total_redemptions: Number(p.total_redemptions || 0),
+        total_discount_given: Number(p.total_discount_given || 0),
+        franchisee_redemptions: franchiseeRedemptions,
+        days_remaining: Number(p.days_remaining ?? 0),
+        product_ids: productRows.map((r) => Number(r.product_id)),
+        products_list: productRows,
+        category_ids: categoryRows.map((r) => Number(r.category_id)),
+        categories_list: categoryRows,
+        tiers: tiers.map((t) => ({
+          min_quantity_or_amount: Number(t.min_quantity_or_amount),
+          discount_value: Number(t.discount_value),
+        })),
+        target_franchisee_ids: targetRows.map((r) => Number(r.franchisee_id)),
+        targets_list: targetRows,
+      };
+      def.how_it_works = formatPromoHowItWorks(def);
+      def.limit_note = formatPromoLimitNote(def);
+      return def;
+    });
+  };
+
+  api.get('/promos', authorize('admin', 'agent', 'franchisee'), requireWarehouse, (req, res) => {
+    const statusFilter = String(req.query.status || '').trim();
+    const todayStr = getTodaySqlDate();
+    const allPromos = loadHydratedPromos(req.user!.franchiseeId);
+
+    if (req.user!.role === 'admin') {
+      const filtered = statusFilter
+        ? allPromos.filter((p) => p.status === statusFilter)
+        : allPromos;
+      res.json({ data: filtered });
+      return;
+    }
+
+    if (req.user!.role === 'franchisee') {
+      const activeForFranchisee = allPromos.filter((p) =>
+        isPromoEligibleForFranchisee(p, {
+          franchiseeId: Number(req.user!.franchiseeId),
+          todayStr,
+        })
+      );
+      res.json({ data: activeForFranchisee });
+      return;
+    }
+
+    // Agent role: read-only list of active promos so agents can inform their franchisees
+    const activePromos = allPromos.filter(
+      (p) =>
+        p.status === 'Active' &&
+        isPromoDateValid(p.start_date, p.end_date, todayStr, Boolean(p.recurring_monthly))
+    );
+    res.json({ data: activePromos });
+  });
+
+  api.get('/promos/popup', authorize('franchisee'), requireWarehouse, (req, res) => {
+    const todayStr = getTodaySqlDate();
+    const allPromos = loadHydratedPromos(req.user!.franchiseeId);
+    const dismissedRows = db
+      .prepare('SELECT promo_id FROM promo_dismissals WHERE user_id = ?')
+      .all(req.user!.id) as { promo_id: number }[];
+    const dismissedPromoIds = dismissedRows.map((r) => Number(r.promo_id));
+
+    const eligiblePopupPromos = filterEligiblePopupPromos(allPromos, {
+      franchiseeId: Number(req.user!.franchiseeId),
+      todayStr,
+      dismissedPromoIds,
+    });
+
+    res.json({ data: eligiblePopupPromos });
+  });
+
+  api.post('/promos/:id/dismiss', authorize('franchisee'), (req, res) => {
+    const promoId = Number(req.params.id);
+    const promo = db.prepare('SELECT id FROM promos WHERE id = ?').get(promoId);
+    if (!promo) {
+      res.status(404).json({ message: 'Promotion not found.' });
+      return;
+    }
+
+    if (req.body && req.body.dismissed === false) {
+      db.prepare('DELETE FROM promo_dismissals WHERE user_id = ? AND promo_id = ?').run(
+        req.user!.id,
+        promoId
+      );
+      res.json({ message: 'Promotion dismissal removed.', promoId });
+      return;
+    }
+
+    db.prepare(
+      `INSERT OR REPLACE INTO promo_dismissals (user_id, promo_id, dismissed_at)
+       VALUES (?, ?, datetime('now'))`
+    ).run(req.user!.id, promoId);
+
+    res.json({ message: 'Promotion dismissal saved.', promoId });
+  });
+
+  api.delete('/promos/:id/dismiss', authorize('franchisee'), (req, res) => {
+    const promoId = Number(req.params.id);
+    db.prepare('DELETE FROM promo_dismissals WHERE user_id = ? AND promo_id = ?').run(
+      req.user!.id,
+      promoId
+    );
+    res.json({ message: 'Promotion dismissal removed.', promoId });
+  });
+
+  api.get('/promos/:id', authorize('admin'), requireWarehouse, (req, res) => {
+    const promoId = Number(req.params.id);
+    const allPromos = loadHydratedPromos();
+    const promo = allPromos.find((p) => p.id === promoId);
+    if (!promo) {
+      res.status(404).json({ message: 'Promotion not found.' });
+      return;
+    }
+
+    const redemptions = db
+      .prepare(
+        `SELECT pr.*, o.order_number, o.subtotal AS order_subtotal, o.total_amount AS order_total, o.status AS order_status,
+                f.store_name, f.owner_name
+         FROM promo_redemptions pr
+         JOIN orders o ON o.id = pr.order_id
+         JOIN franchisees f ON f.id = pr.franchisee_id
+         WHERE pr.promo_id = ?
+         ORDER BY pr.id DESC`
+      )
+      .all(promoId);
+
+    res.json({ promo, redemptions });
+  });
+
+  const savePromoRelations = (promoId: number, body: any) => {
+    db.prepare('DELETE FROM promo_products WHERE promo_id = ?').run(promoId);
+    db.prepare('DELETE FROM promo_categories WHERE promo_id = ?').run(promoId);
+    db.prepare('DELETE FROM promo_tiers WHERE promo_id = ?').run(promoId);
+    db.prepare('DELETE FROM promo_targets WHERE promo_id = ?').run(promoId);
+
+    if (Array.isArray(body.product_ids)) {
+      const ins = db.prepare(
+        'INSERT OR IGNORE INTO promo_products (promo_id, product_id) VALUES (?, ?)'
+      );
+      for (const pid of body.product_ids) {
+        if (Number(pid) > 0) ins.run(promoId, Number(pid));
+      }
+    }
+    if (Array.isArray(body.category_ids)) {
+      const ins = db.prepare(
+        'INSERT OR IGNORE INTO promo_categories (promo_id, category_id) VALUES (?, ?)'
+      );
+      for (const cid of body.category_ids) {
+        if (Number(cid) > 0) ins.run(promoId, Number(cid));
+      }
+    }
+    if (Array.isArray(body.tiers)) {
+      const ins = db.prepare(
+        'INSERT INTO promo_tiers (promo_id, min_quantity_or_amount, discount_value) VALUES (?, ?, ?)'
+      );
+      for (const t of body.tiers) {
+        if (Number(t.min_quantity_or_amount) > 0 && Number(t.discount_value) > 0) {
+          ins.run(promoId, Number(t.min_quantity_or_amount), Number(t.discount_value));
+        }
+      }
+    }
+    if (Array.isArray(body.target_franchisee_ids)) {
+      const ins = db.prepare(
+        'INSERT OR IGNORE INTO promo_targets (promo_id, franchisee_id) VALUES (?, ?)'
+      );
+      for (const fid of body.target_franchisee_ids) {
+        if (Number(fid) > 0) ins.run(promoId, Number(fid));
+      }
+    }
+  };
+
+  api.post('/promos', authorize('admin'), requireWarehouse, (req, res) => {
+    const body = req.body;
+    const validation = validatePromoPayload(body);
+    if (!validation.ok) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    // Check for overlapping duplicate promo with same name and overlapping dates
+    const dup = db
+      .prepare(
+        `SELECT id FROM promos
+         WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))
+           AND status != 'Expired'
+           AND date(start_date) <= date(?)
+           AND date(end_date) >= date(?)`
+      )
+      .get(
+        String(body.name).trim(),
+        String(body.end_date).slice(0, 10),
+        String(body.start_date).slice(0, 10)
+      );
+    if (dup) {
+      res.status(409).json({
+        message: 'An overlapping promotion with the same name already exists in this date range.',
+      });
+      return;
+    }
+
+    const status = ['Draft', 'Active', 'Paused'].includes(body.status) ? body.status : 'Draft';
+
+    const tx = db.transaction(() => {
+      const result = db
+        .prepare(
+          `INSERT INTO promos (
+             name, description, promo_type, tier_basis, discount_type, discount_value,
+             min_order_amount, min_quantity, buy_quantity, free_quantity, free_product_id,
+             free_delivery, max_discount_cap, scope, start_date, end_date, recurring_monthly,
+             usage_limit_total, usage_limit_per_franchisee, stackable, status, created_by
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          String(body.name).trim(),
+          body.description ? String(body.description).trim() : null,
+          String(body.promo_type),
+          body.tier_basis === 'amount' ? 'amount' : 'quantity',
+          body.discount_type === 'fixed' ? 'fixed' : 'percent',
+          Number(body.discount_value || 0),
+          Number(body.min_order_amount || 0),
+          Number(body.min_quantity || 0),
+          Number(body.buy_quantity || 0),
+          Number(body.free_quantity || 0),
+          body.free_product_id ? Number(body.free_product_id) : null,
+          body.free_delivery ? 1 : 0,
+          body.max_discount_cap && Number(body.max_discount_cap) > 0
+            ? Number(body.max_discount_cap)
+            : null,
+          ['all_products', 'category', 'product'].includes(body.scope)
+            ? body.scope
+            : 'all_products',
+          String(body.start_date).slice(0, 10),
+          String(body.end_date).slice(0, 10),
+          body.recurring_monthly ? 1 : 0,
+          body.usage_limit_total && Number(body.usage_limit_total) > 0
+            ? Number(body.usage_limit_total)
+            : null,
+          body.usage_limit_per_franchisee && Number(body.usage_limit_per_franchisee) > 0
+            ? Number(body.usage_limit_per_franchisee)
+            : null,
+          body.stackable ? 1 : 0,
+          status,
+          req.user!.id
+        );
+
+      const promoId = Number(result.lastInsertRowid);
+      savePromoRelations(promoId, body);
+
+      logActivity(
+        req.user!.id,
+        'PROMO_CREATED',
+        'promo',
+        promoId,
+        `Created promo "${String(body.name).trim()}" (${status})`
+      );
+
+      if (status === 'Active') {
+        const preview = formatPromoHowItWorks(body);
+        notifyTargetedFranchiseesForPromo(
+          promoId,
+          `New Active Promo: ${String(body.name).trim()}`,
+          `${preview}. Valid until ${String(body.end_date).slice(0, 10)}. Discount applies automatically at checkout!`
+        );
+      }
+
+      return promoId;
+    });
+
+    const promoId = tx();
+    res.status(201).json({ message: 'Promotion created successfully.', id: promoId });
+  });
+
+  api.put('/promos/:id', authorize('admin'), requireWarehouse, (req, res) => {
+    const promoId = Number(req.params.id);
+    const existing = db.prepare('SELECT * FROM promos WHERE id = ?').get(promoId) as any;
+    if (!existing) {
+      res.status(404).json({ message: 'Promotion not found.' });
+      return;
+    }
+
+    const body = req.body;
+    const validation = validatePromoPayload(body);
+    if (!validation.ok) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const dup = db
+      .prepare(
+        `SELECT id FROM promos
+         WHERE id != ?
+           AND LOWER(TRIM(name)) = LOWER(TRIM(?))
+           AND status != 'Expired'
+           AND date(start_date) <= date(?)
+           AND date(end_date) >= date(?)`
+      )
+      .get(
+        promoId,
+        String(body.name).trim(),
+        String(body.end_date).slice(0, 10),
+        String(body.start_date).slice(0, 10)
+      );
+    if (dup) {
+      res.status(409).json({
+        message: 'An overlapping promotion with the same name already exists in this date range.',
+      });
+      return;
+    }
+
+    const status = ['Draft', 'Active', 'Paused', 'Expired'].includes(body.status)
+      ? body.status
+      : existing.status;
+
+    const existingHydrated = loadHydratedPromos().find((p) => p.id === promoId);
+    const rulesOrDatesChanged = existingHydrated
+      ? hasPromoRulesOrDatesChanged(existingHydrated, body)
+      : true;
+
+    const tx = db.transaction(() => {
+      db.prepare(
+        `UPDATE promos
+         SET name = ?, description = ?, promo_type = ?, tier_basis = ?, discount_type = ?, discount_value = ?,
+             min_order_amount = ?, min_quantity = ?, buy_quantity = ?, free_quantity = ?, free_product_id = ?,
+             free_delivery = ?, max_discount_cap = ?, scope = ?, start_date = ?, end_date = ?, recurring_monthly = ?,
+             usage_limit_total = ?, usage_limit_per_franchisee = ?, stackable = ?, status = ?, updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(
+        String(body.name).trim(),
+        body.description ? String(body.description).trim() : null,
+        String(body.promo_type),
+        body.tier_basis === 'amount' ? 'amount' : 'quantity',
+        body.discount_type === 'fixed' ? 'fixed' : 'percent',
+        Number(body.discount_value || 0),
+        Number(body.min_order_amount || 0),
+        Number(body.min_quantity || 0),
+        Number(body.buy_quantity || 0),
+        Number(body.free_quantity || 0),
+        body.free_product_id ? Number(body.free_product_id) : null,
+        body.free_delivery ? 1 : 0,
+        body.max_discount_cap && Number(body.max_discount_cap) > 0
+          ? Number(body.max_discount_cap)
+          : null,
+        ['all_products', 'category', 'product'].includes(body.scope)
+          ? body.scope
+          : 'all_products',
+        String(body.start_date).slice(0, 10),
+        String(body.end_date).slice(0, 10),
+        body.recurring_monthly ? 1 : 0,
+        body.usage_limit_total && Number(body.usage_limit_total) > 0
+          ? Number(body.usage_limit_total)
+          : null,
+        body.usage_limit_per_franchisee && Number(body.usage_limit_per_franchisee) > 0
+          ? Number(body.usage_limit_per_franchisee)
+          : null,
+        body.stackable ? 1 : 0,
+        status,
+        promoId
+      );
+
+      savePromoRelations(promoId, body);
+
+      // Reset dismissals when the promo's rules or dates change
+      if (rulesOrDatesChanged) {
+        db.prepare('DELETE FROM promo_dismissals WHERE promo_id = ?').run(promoId);
+      }
+
+      logActivity(
+        req.user!.id,
+        'PROMO_UPDATED',
+        'promo',
+        promoId,
+        `Updated promo "${String(body.name).trim()}" (${status})${rulesOrDatesChanged ? ' [dismissals reset]' : ''}`
+      );
+
+      if (existing.status !== 'Active' && status === 'Active') {
+        const preview = formatPromoHowItWorks(body);
+        notifyTargetedFranchiseesForPromo(
+          promoId,
+          `New Active Promo: ${String(body.name).trim()}`,
+          `${preview}. Valid until ${String(body.end_date).slice(0, 10)}. Discount applies automatically at checkout!`
+        );
+      }
+    });
+
+    tx();
+    res.json({ message: 'Promotion updated successfully.' });
+  });
+
+  api.patch('/promos/:id/status', authorize('admin'), requireWarehouse, (req, res) => {
+    const promoId = Number(req.params.id);
+    const { status } = req.body;
+    if (!['Draft', 'Active', 'Paused', 'Expired'].includes(status)) {
+      res.status(400).json({ message: 'Invalid promo status.' });
+      return;
+    }
+
+    const existing = db.prepare('SELECT * FROM promos WHERE id = ?').get(promoId) as any;
+    if (!existing) {
+      res.status(404).json({ message: 'Promotion not found.' });
+      return;
+    }
+
+    db.prepare("UPDATE promos SET status = ?, updated_at = datetime('now') WHERE id = ?").run(
+      status,
+      promoId
+    );
+
+    const actionLabel =
+      status === 'Paused'
+        ? 'PROMO_PAUSED'
+        : status === 'Active'
+        ? 'PROMO_ACTIVATED'
+        : status === 'Expired'
+        ? 'PROMO_ENDED'
+        : 'PROMO_STATUS_CHANGED';
+
+    logActivity(
+      req.user!.id,
+      actionLabel,
+      'promo',
+      promoId,
+      `${existing.name} -> ${status}`
+    );
+
+    if (existing.status !== 'Active' && status === 'Active') {
+      const hydrated = loadHydratedPromos().find((p) => p.id === promoId);
+      if (hydrated) {
+        notifyTargetedFranchiseesForPromo(
+          promoId,
+          `New Active Promo: ${hydrated.name}`,
+          `${hydrated.how_it_works}. Valid until ${hydrated.end_date}. Discount applies automatically at checkout!`
+        );
+      }
+    }
+
+    res.json({ message: `Promotion status changed to ${status}.` });
+  });
+
+  api.post('/promos/:id/duplicate', authorize('admin'), requireWarehouse, (req, res) => {
+    const promoId = Number(req.params.id);
+    const hydrated = loadHydratedPromos().find((p) => p.id === promoId);
+    if (!hydrated) {
+      res.status(404).json({ message: 'Promotion not found.' });
+      return;
+    }
+
+    const copyName = `${hydrated.name} (Copy ${Date.now().toString().slice(-4)})`;
+    const tx = db.transaction(() => {
+      const result = db
+        .prepare(
+          `INSERT INTO promos (
+             name, description, promo_type, tier_basis, discount_type, discount_value,
+             min_order_amount, min_quantity, buy_quantity, free_quantity, free_product_id,
+             free_delivery, max_discount_cap, scope, start_date, end_date, recurring_monthly,
+             usage_limit_total, usage_limit_per_franchisee, stackable, status, created_by
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', ?)`
+        )
+        .run(
+          copyName,
+          hydrated.description || null,
+          hydrated.promo_type,
+          hydrated.tier_basis || 'quantity',
+          hydrated.discount_type,
+          hydrated.discount_value,
+          hydrated.min_order_amount,
+          hydrated.min_quantity,
+          hydrated.buy_quantity,
+          hydrated.free_quantity,
+          hydrated.free_product_id || null,
+          hydrated.free_delivery ? 1 : 0,
+          hydrated.max_discount_cap,
+          hydrated.scope,
+          hydrated.start_date,
+          hydrated.end_date,
+          hydrated.recurring_monthly ? 1 : 0,
+          hydrated.usage_limit_total,
+          hydrated.usage_limit_per_franchisee,
+          hydrated.stackable ? 1 : 0,
+          req.user!.id
+        );
+      const newId = Number(result.lastInsertRowid);
+      savePromoRelations(newId, {
+        product_ids: hydrated.product_ids,
+        category_ids: hydrated.category_ids,
+        tiers: hydrated.tiers,
+        target_franchisee_ids: hydrated.target_franchisee_ids,
+      });
+
+      logActivity(
+        req.user!.id,
+        'PROMO_DUPLICATED',
+        'promo',
+        newId,
+        `Duplicated promo #${promoId} as "${copyName}"`
+      );
+      return newId;
+    });
+
+    const newId = tx();
+    res.status(201).json({ message: 'Promotion duplicated as Draft.', id: newId });
+  });
+
+  api.post('/promos/evaluate-cart', authorize('franchisee'), requireWarehouse, (req, res) => {
+    const { items } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      res.json({
+        subtotal: 0,
+        discount_amount: 0,
+        delivery_fee: 0,
+        free_delivery_applied: false,
+        final_total: 0,
+        primary_promo_id: null,
+        applied_promos: [],
+        free_items: [],
+        item_discounts: {},
+        hints: [],
+      });
+      return;
+    }
+
+    const cartEvalItems: {
+      product_id: number;
+      category_id: number;
+      name: string;
+      quantity: number;
+      unit_price: number;
+    }[] = [];
+
+    for (const item of items) {
+      const qty = parseInt(String(item.quantity), 10);
+      if (!item.product_id || Number.isNaN(qty) || qty <= 0) continue;
+      const prod = db
+        .prepare('SELECT id, category_id, name, price FROM products WHERE id = ? AND is_active = 1')
+        .get(Number(item.product_id)) as
+        | { id: number; category_id: number; name: string; price: number }
+        | undefined;
+      if (prod) {
+        cartEvalItems.push({
+          product_id: prod.id,
+          category_id: prod.category_id,
+          name: prod.name,
+          quantity: qty,
+          unit_price: Number(prod.price),
+        });
+      }
+    }
+
+    const promos = loadHydratedPromos(req.user!.franchiseeId);
+    const evaluation = evaluatePromosForCart(cartEvalItems, promos, {
+      franchiseeId: Number(req.user!.franchiseeId),
+      todayStr: getTodaySqlDate(),
+    });
+
+    res.json(evaluation);
+  });
+
+  // ===== ORDERS (Franchisee & Admin — With Server-Side Promo Calculation & Stock Deduction) =====
   api.post('/orders', authorize('franchisee'), requireWarehouse, (req, res) => {
     const { warehouse_id, requested_delivery_datetime, notes, items } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
@@ -1667,12 +2899,14 @@ async function startServer() {
       return;
     }
 
-    let totalAmount = 0;
     const normalizedItems: {
       product_id: number;
+      category_id: number;
+      name: string;
       quantity: number;
       unit_price: number;
       subtotal: number;
+      stock: number;
     }[] = [];
 
     for (const item of items) {
@@ -1684,13 +2918,13 @@ async function startServer() {
 
       const prod = db
         .prepare(
-          `SELECT p.id, p.name, p.price, COALESCE(i.quantity, 0) AS stock
+          `SELECT p.id, p.category_id, p.name, p.price, COALESCE(i.quantity, 0) AS stock
            FROM products p
            LEFT JOIN inventory i ON i.product_id = p.id AND i.warehouse_id = ?
            WHERE p.id = ? AND p.is_active = 1`
         )
         .get(whId, Number(item.product_id)) as
-        | { id: number; name: string; price: number; stock: number }
+        | { id: number; category_id: number; name: string; price: number; stock: number }
         | undefined;
 
       if (!prod) {
@@ -1704,14 +2938,39 @@ async function startServer() {
         return;
       }
 
-      const subtotal = Number(prod.price) * qty;
-      totalAmount += subtotal;
+      const subtotal = Number((Number(prod.price) * qty).toFixed(2));
       normalizedItems.push({
         product_id: prod.id,
+        category_id: prod.category_id,
+        name: prod.name,
         quantity: qty,
         unit_price: Number(prod.price),
         subtotal,
+        stock: prod.stock,
       });
+    }
+
+    // Server-side promo evaluation (never trust client discount values)
+    const promos = loadHydratedPromos(req.user!.franchiseeId);
+    const promoEval = evaluatePromosForCart(normalizedItems, promos, {
+      franchiseeId: Number(req.user!.franchiseeId),
+      todayStr: getTodaySqlDate(),
+    });
+
+    // Verify warehouse stock also covers any Buy X Get Y free items
+    for (const fi of promoEval.free_items) {
+      const paidItem = normalizedItems.find((n) => n.product_id === fi.product_id);
+      const totalNeeded = (paidItem ? paidItem.quantity : 0) + fi.free_qty;
+      const stockRow = db
+        .prepare('SELECT COALESCE(quantity, 0) AS stock FROM inventory WHERE warehouse_id = ? AND product_id = ?')
+        .get(whId, fi.product_id) as { stock: number } | undefined;
+      const avail = stockRow ? stockRow.stock : 0;
+      if (avail < totalNeeded) {
+        res.status(400).json({
+          message: `Insufficient warehouse stock to include ${fi.free_qty} free box(es) of ${fi.name} (needed: ${totalNeeded}, available: ${avail}).`,
+        });
+        return;
+      }
     }
 
     const orderNumber = `AICE-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
@@ -1719,33 +2978,95 @@ async function startServer() {
     const tx = db.transaction(() => {
       const oRes = db
         .prepare(
-          `INSERT INTO orders (order_number, franchisee_id, warehouse_id, status, total_amount, requested_delivery_datetime, notes)
-           VALUES (?, ?, ?, 'Placed', ?, ?, ?)`
+          `INSERT INTO orders (
+             order_number, franchisee_id, warehouse_id, status,
+             subtotal, discount_amount, delivery_fee, total_amount,
+             promo_id, applied_promos_json, requested_delivery_datetime, notes
+           ) VALUES (?, ?, ?, 'Placed', ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           orderNumber,
           req.user!.franchiseeId,
           whId,
-          totalAmount,
+          promoEval.subtotal,
+          promoEval.discount_amount,
+          promoEval.delivery_fee,
+          promoEval.final_total,
+          promoEval.primary_promo_id,
+          promoEval.applied_promos.length > 0
+            ? JSON.stringify(promoEval.applied_promos)
+            : null,
           requested_delivery_datetime || null,
           notes ? String(notes).trim() : null
         );
 
       const orderId = Number(oRes.lastInsertRowid);
       const insertItem = db.prepare(
-        'INSERT INTO order_items (order_id, product_id, quantity, unit_price, subtotal) VALUES (?, ?, ?, ?, ?)'
+        `INSERT INTO order_items (
+           order_id, product_id, quantity, unit_price, subtotal, discount_amount, is_free_item
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`
       );
+
       for (const ni of normalizedItems) {
-        insertItem.run(orderId, ni.product_id, ni.quantity, ni.unit_price, ni.subtotal);
+        const itemDisc = Number(promoEval.item_discounts[ni.product_id] || 0);
+        insertItem.run(
+          orderId,
+          ni.product_id,
+          ni.quantity,
+          ni.unit_price,
+          ni.subtotal,
+          itemDisc,
+          0
+        );
       }
+
+      // Insert Buy X Get Y free items into order_items so they are delivered and deducted from warehouse stock
+      for (const fi of promoEval.free_items) {
+        insertItem.run(
+          orderId,
+          fi.product_id,
+          fi.free_qty,
+          0,
+          0,
+          fi.free_value,
+          1
+        );
+      }
+
+      // Record promo redemptions
+      const insertRedemption = db.prepare(
+        `INSERT INTO promo_redemptions (promo_id, order_id, franchisee_id, discount_amount)
+         VALUES (?, ?, ?, ?)`
+      );
+      for (const ap of promoEval.applied_promos) {
+        const recordedDiscount = Number(
+          (Number(ap.discount_amount || 0) + Number(ap.free_items_value || 0)).toFixed(2)
+        );
+        insertRedemption.run(
+          ap.promo_id,
+          orderId,
+          req.user!.franchiseeId,
+          recordedDiscount
+        );
+      }
+
+      const promoSummaryNote =
+        promoEval.applied_promos.length > 0
+          ? ` (Promo applied: ${promoEval.applied_promos.map((p) => p.name).join(', ')})`
+          : '';
 
       db.prepare(
         'INSERT INTO order_status_history (order_id, status, notes, changed_by) VALUES (?, ?, ?, ?)'
-      ).run(orderId, 'Placed', 'Order placed by franchisee', req.user!.id);
+      ).run(
+        orderId,
+        'Placed',
+        `Order placed by franchisee${promoSummaryNote}`,
+        req.user!.id
+      );
 
       notifyAdmins(
         'New Replenishment Order',
-        `${req.user!.storeName} placed order ${orderNumber} (PHP ${totalAmount.toFixed(2)}).`,
+        `${req.user!.storeName} placed order ${orderNumber} (Total PHP ${promoEval.final_total.toFixed(2)}${promoSummaryNote}).`,
         'order',
         orderId
       );
@@ -1754,7 +3075,7 @@ async function startServer() {
         'ORDER_PLACED',
         'order',
         orderId,
-        `Placed ${orderNumber} totaling PHP ${totalAmount.toFixed(2)}`
+        `Placed ${orderNumber} totaling PHP ${promoEval.final_total.toFixed(2)}${promoSummaryNote}`
       );
       return orderId;
     });
@@ -1764,6 +3085,7 @@ async function startServer() {
       message: 'Order placed successfully.',
       id: orderId,
       order_number: orderNumber,
+      promo_evaluation: promoEval,
     });
   });
 
@@ -1789,7 +3111,11 @@ async function startServer() {
 
     const rows = db
       .prepare(
-        `SELECT o.*, f.store_name, f.owner_name, f.address AS store_address, f.contact_number AS store_contact,
+        `SELECT o.*,
+                COALESCE(o.subtotal, o.total_amount) AS subtotal,
+                COALESCE(o.discount_amount, 0) AS discount_amount,
+                (SELECT pr.name FROM promos pr WHERE pr.id = o.promo_id) AS promo_name,
+                f.store_name, f.owner_name, f.address AS store_address, f.contact_number AS store_contact,
                 w.name AS warehouse_name, d.id AS delivery_id, du.full_name AS delivery_staff_name
          FROM orders o
          JOIN franchisees f ON f.id = o.franchisee_id
@@ -1823,6 +3149,43 @@ async function startServer() {
     });
   });
 
+  api.post('/orders/:id/cancel', authorize('franchisee'), requireWarehouse, (req, res) => {
+    const orderId = Number(req.params.id);
+    const { reason } = req.body;
+    const order = db
+      .prepare('SELECT * FROM orders WHERE id = ? AND franchisee_id = ?')
+      .get(orderId, req.user!.franchiseeId) as any;
+
+    if (!order) {
+      res.status(404).json({ message: 'Order not found.' });
+      return;
+    }
+    if (order.status !== 'Placed') {
+      res.status(400).json({ message: 'Only Placed orders can be cancelled by the franchisee.' });
+      return;
+    }
+
+    const tx = db.transaction(() => {
+      db.prepare(
+        "UPDATE orders SET status = 'Cancelled', cancel_reason = ?, updated_at = datetime('now') WHERE id = ?"
+      ).run(reason || 'Cancelled by franchisee', orderId);
+      db.prepare('DELETE FROM promo_redemptions WHERE order_id = ?').run(orderId);
+      db.prepare(
+        "INSERT INTO order_status_history (order_id, status, notes, changed_by) VALUES (?, 'Cancelled', ?, ?)"
+      ).run(orderId, reason || 'Cancelled by franchisee (promo redemption reversed)', req.user!.id);
+      logActivity(
+        req.user!.id,
+        'ORDER_CANCELLED',
+        'order',
+        orderId,
+        `Cancelled ${order.order_number} and restored promo usage`
+      );
+    });
+
+    tx();
+    res.json({ message: 'Order cancelled and promotion usage restored.' });
+  });
+
   api.patch('/orders/:id/status', authorize('admin'), requireWarehouse, (req, res) => {
     const orderId = Number(req.params.id);
     const { status, notes } = req.body;
@@ -1851,7 +3214,7 @@ async function startServer() {
 
     try {
       const tx = db.transaction(() => {
-        // Deduct stock from warehouse when Admin confirms order
+        // Deduct stock from warehouse when Admin confirms order (includes Buy X Get Y free items)
         if (status === 'Confirmed' && !order.stock_deducted) {
           for (const it of items) {
             const inv = db
@@ -1878,7 +3241,7 @@ async function startServer() {
               curQty,
               newQty,
               order.id,
-              `Confirmed ${order.order_number}`,
+              `Confirmed ${order.order_number}${it.is_free_item ? ' (Promo Free Item)' : ''}`,
               req.user!.id
             );
 
@@ -1897,44 +3260,48 @@ async function startServer() {
           db.prepare('UPDATE orders SET stock_deducted = 1 WHERE id = ?').run(orderId);
         }
 
-        // Restore stock if order is Cancelled or Rejected after deduction
-        if ((status === 'Cancelled' || status === 'Rejected') && order.stock_deducted) {
-          for (const it of items) {
-            const inv = db
-              .prepare('SELECT id, quantity FROM inventory WHERE warehouse_id = ? AND product_id = ?')
-              .get(order.warehouse_id, it.product_id) as { id: number; quantity: number } | undefined;
-            const curQty = inv ? inv.quantity : 0;
-            const newQty = curQty + it.quantity;
-            if (inv) {
-              db.prepare("UPDATE inventory SET quantity = ?, updated_at = datetime('now') WHERE id = ?").run(
-                newQty,
-                inv.id
-              );
-            } else {
-              db.prepare('INSERT INTO inventory (warehouse_id, product_id, quantity) VALUES (?, ?, ?)').run(
+        // Restore stock and reverse promo redemptions if order is Cancelled or Rejected
+        if (status === 'Cancelled' || status === 'Rejected') {
+          db.prepare('DELETE FROM promo_redemptions WHERE order_id = ?').run(orderId);
+
+          if (order.stock_deducted) {
+            for (const it of items) {
+              const inv = db
+                .prepare('SELECT id, quantity FROM inventory WHERE warehouse_id = ? AND product_id = ?')
+                .get(order.warehouse_id, it.product_id) as { id: number; quantity: number } | undefined;
+              const curQty = inv ? inv.quantity : 0;
+              const newQty = curQty + it.quantity;
+              if (inv) {
+                db.prepare("UPDATE inventory SET quantity = ?, updated_at = datetime('now') WHERE id = ?").run(
+                  newQty,
+                  inv.id
+                );
+              } else {
+                db.prepare('INSERT INTO inventory (warehouse_id, product_id, quantity) VALUES (?, ?, ?)').run(
+                  order.warehouse_id,
+                  it.product_id,
+                  newQty
+                );
+              }
+              db.prepare(
+                `INSERT INTO stock_movements (warehouse_id, product_id, movement_type, quantity_change, previous_qty, new_qty, reference_order_id, notes, performed_by)
+                 VALUES (?, ?, 'ORDER_RESTORE', ?, ?, ?, ?, ?, ?)`
+              ).run(
                 order.warehouse_id,
                 it.product_id,
-                newQty
+                it.quantity,
+                curQty,
+                newQty,
+                order.id,
+                `${status} ${order.order_number}`,
+                req.user!.id
               );
             }
-            db.prepare(
-              `INSERT INTO stock_movements (warehouse_id, product_id, movement_type, quantity_change, previous_qty, new_qty, reference_order_id, notes, performed_by)
-               VALUES (?, ?, 'ORDER_RESTORE', ?, ?, ?, ?, ?, ?)`
-            ).run(
-              order.warehouse_id,
-              it.product_id,
-              it.quantity,
-              curQty,
-              newQty,
-              order.id,
-              `${status} ${order.order_number}`,
-              req.user!.id
+            db.prepare('UPDATE orders SET stock_deducted = 0, cancel_reason = ? WHERE id = ?').run(
+              notes || null,
+              orderId
             );
           }
-          db.prepare('UPDATE orders SET stock_deducted = 0, cancel_reason = ? WHERE id = ?').run(
-            notes || null,
-            orderId
-          );
         }
 
         db.prepare("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE id = ?").run(
@@ -2048,7 +3415,11 @@ async function startServer() {
     const orderId = Number(req.params.id);
     const order = db
       .prepare(
-        `SELECT o.*, f.store_name, f.address AS store_address, f.contact_number AS store_contact, f.lat AS store_lat, f.lng AS store_lng,
+        `SELECT o.*,
+                COALESCE(o.subtotal, o.total_amount) AS subtotal,
+                COALESCE(o.discount_amount, 0) AS discount_amount,
+                (SELECT pr.name FROM promos pr WHERE pr.id = o.promo_id) AS promo_name,
+                f.store_name, f.address AS store_address, f.contact_number AS store_contact, f.lat AS store_lat, f.lng AS store_lng,
                 w.name AS warehouse_name, w.address AS warehouse_address, w.lat AS warehouse_lat, w.lng AS warehouse_lng,
                 d.id AS delivery_id, d.status AS delivery_status, d.proof_note, d.proof_image_url, d.near_notified,
                 du.full_name AS delivery_staff_name, du.contact_number AS delivery_staff_contact
@@ -2137,7 +3508,12 @@ async function startServer() {
 
     const rows = db
       .prepare(
-        `SELECT d.*, o.order_number, o.total_amount, o.status AS order_status, o.notes AS order_notes, o.requested_delivery_datetime,
+        `SELECT d.*,
+                o.order_number,
+                COALESCE(o.subtotal, o.total_amount) AS subtotal,
+                COALESCE(o.discount_amount, 0) AS discount_amount,
+                (SELECT pr.name FROM promos pr WHERE pr.id = o.promo_id) AS promo_name,
+                o.total_amount, o.status AS order_status, o.notes AS order_notes, o.requested_delivery_datetime,
                 f.store_name, f.owner_name, f.address AS store_address, f.contact_number AS store_contact, f.lat AS store_lat, f.lng AS store_lng,
                 w.name AS warehouse_name, w.address AS warehouse_address, w.lat AS warehouse_lat, w.lng AS warehouse_lng
          FROM deliveries d
