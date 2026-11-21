@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import { GoogleGenAI } from '@google/genai';
 import db, { initDatabase } from './server/db';
 import {
   haversineKm,
@@ -25,6 +26,22 @@ import {
   filterEligiblePopupPromos,
   formatPromoLimitNote,
   hasPromoRulesOrDatesChanged,
+  getNotificationTypesForRoute,
+  sanitizePublicText,
+  projectPublicProduct,
+  projectPublicStore,
+  projectPublicPromo,
+  CHATBOT_SYSTEM_PROMPT,
+  CHATBOT_AI_SUBTLE_LABEL,
+  CHATBOT_MAX_MESSAGE_LENGTH,
+  sanitizeChatbotText,
+  matchFaqQuestion,
+  isChatbotAiConfigured,
+  parseChatbotDailyCap,
+  buildStandardChatbotFallback,
+  checkChatbotIpMessageLimit,
+  checkChatbotIpAiLimit,
+  ChatbotIpBucket,
   PromoDefinition,
 } from './src/utils/domainRules';
 
@@ -280,6 +297,372 @@ async function startServer() {
     res.json({ hasWarehouse: row.cnt > 0, warehouseCount: row.cnt });
   });
 
+  // In-memory rate limiter for /api/public/* (max 90 requests per 60-second window per IP)
+  const publicRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+  const publicRateLimiter = (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const clientIp =
+      String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown')
+        .split(',')[0]
+        .trim() || 'unknown';
+
+    const bucket = publicRateLimitBuckets.get(clientIp);
+    if (!bucket || now >= bucket.resetAt) {
+      publicRateLimitBuckets.set(clientIp, { count: 1, resetAt: now + 60_000 });
+      next();
+      return;
+    }
+
+    bucket.count += 1;
+    if (bucket.count > 90) {
+      res.status(429).json({
+        message: 'Too many requests to public endpoints. Please try again in a minute.',
+      });
+      return;
+    }
+    next();
+  };
+
+  const getPublicSettingsMap = () => {
+    const rows = db
+      .prepare('SELECT key, value FROM system_settings')
+      .all() as { key: string; value: string }[];
+    const map: Record<string, string> = {};
+    for (const r of rows) {
+      map[r.key] = r.value;
+    }
+    return {
+      show_public_prices:
+        (map.show_public_prices ?? process.env.PUBLIC_SHOW_PRICES ?? '0') === '1',
+      contact_email: sanitizePublicText(
+        map.contact_email || process.env.PUBLIC_CONTACT_EMAIL || 'franchising@aicehub.local'
+      ),
+      contact_phone: sanitizePublicText(
+        map.contact_phone || process.env.PUBLIC_CONTACT_PHONE || '+63 (02) 8888-2423'
+      ),
+    };
+  };
+
+  api.use('/public', publicRateLimiter);
+
+  // GET /api/public/products: active products only, safe fields only (no stock quantities, no prices unless enabled)
+  api.get('/public/products', (_req, res) => {
+    const settings = getPublicSettingsMap();
+    const rows = db
+      .prepare(
+        `SELECT p.id, p.name, p.flavor, p.size, p.image_url, p.price, c.name AS category_name
+         FROM products p
+         JOIN categories c ON c.id = p.category_id
+         WHERE p.is_active = 1
+         ORDER BY c.name ASC, p.name ASC`
+      )
+      .all() as Record<string, any>[];
+
+    const data = rows.map((r) => projectPublicProduct(r, settings.show_public_prices));
+    res.json({
+      data,
+      show_prices: settings.show_public_prices,
+    });
+  });
+
+  // GET /api/public/stores: approved franchisees only, safe fields only (store_name, area, lat, lng)
+  api.get('/public/stores', (_req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT f.id, f.store_name, f.address, f.lat, f.lng
+         FROM franchisees f
+         JOIN users u ON u.id = f.user_id
+         WHERE f.status = 'Approved' AND u.is_active = 1
+         ORDER BY f.store_name ASC`
+      )
+      .all() as Record<string, any>[];
+
+    const data = rows.map((r) => projectPublicStore(r));
+    res.json({ data });
+  });
+
+  // GET /api/public/promos: active promos within valid dates, safe fields only (name, short_description, valid_until)
+  api.get('/public/promos', (_req, res) => {
+    // Auto-expire past non-recurring promos first
+    db.prepare(
+      `UPDATE promos
+       SET status = 'Expired', updated_at = datetime('now')
+       WHERE status IN ('Active', 'Paused')
+         AND COALESCE(recurring_monthly, 0) = 0
+         AND date(end_date) < date('now')`
+    ).run();
+
+    const todayRow = db.prepare("SELECT date('now') AS d").get() as { d: string };
+    const todayStr = todayRow.d;
+
+    const rawPromos = db
+      .prepare(
+        `SELECT id, name, description, promo_type, tier_basis, discount_type, discount_value,
+                min_order_amount, min_quantity, buy_quantity, free_quantity, free_delivery,
+                max_discount_cap, scope, start_date, end_date, recurring_monthly, status
+         FROM promos
+         WHERE status = 'Active'
+         ORDER BY id DESC`
+      )
+      .all() as Record<string, any>[];
+
+    const activePromos = rawPromos
+      .map((p: Record<string, any>): Record<string, any> => {
+        const tiers = db
+          .prepare(
+            'SELECT min_quantity_or_amount, discount_value FROM promo_tiers WHERE promo_id = ? ORDER BY min_quantity_or_amount ASC'
+          )
+          .all(p.id);
+        return { ...p, tiers };
+      })
+      .filter((p) =>
+        isPromoDateValid(
+          String(p.start_date),
+          String(p.end_date),
+          todayStr,
+          Boolean(p.recurring_monthly)
+        )
+      )
+      .map((p) => projectPublicPromo(p));
+
+    res.json({ data: activePromos });
+  });
+
+  // GET /api/public/faqs: active FAQs visible to "all"
+  api.get('/public/faqs', (_req, res) => {
+    const rows = db
+      .prepare(
+        `SELECT id, question, answer
+         FROM faqs
+         WHERE is_active = 1 AND LOWER(audience) = 'all'
+         ORDER BY sort_order ASC, id ASC`
+      )
+      .all() as { id: number; question: string; answer: string }[];
+
+    const data = rows.map((r) => ({
+      id: Number(r.id),
+      question: sanitizePublicText(r.question),
+      answer: sanitizePublicText(r.answer),
+    }));
+    res.json({ data });
+  });
+
+  // GET /api/public/settings: safe public contact email, phone, and show_public_prices toggle
+  api.get('/public/settings', (_req, res) => {
+    res.json(getPublicSettingsMap());
+  });
+
+  // Per-IP rate limiter store for public chatbot (10 messages/min, 5 AI calls/hour)
+  const chatbotIpRateStore = new Map<string, ChatbotIpBucket>();
+
+  const recordUnansweredQuestion = (sessionId: string, question: string) => {
+    const cleanQ = sanitizeChatbotText(question, CHATBOT_MAX_MESSAGE_LENGTH);
+    const cleanSession = sanitizeChatbotText(sessionId || 'anon', 80) || 'anon';
+    if (!cleanQ) return;
+
+    // Avoid inserting duplicate open identical question in the same session
+    const existing = db
+      .prepare(
+        `SELECT id FROM chat_unanswered
+         WHERE LOWER(question) = LOWER(?) AND status = 'Open'
+         LIMIT 1`
+      )
+      .get(cleanQ) as { id: number } | undefined;
+
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO chat_unanswered (session_id, question, status, created_at)
+         VALUES (?, ?, 'Open', datetime('now'))`
+      ).run(cleanSession, cleanQ);
+    }
+  };
+
+  // POST /api/public/chatbot/ask: FAQ match first -> optional server-side Gemini AI fallback -> standard contact fallback
+  api.post('/public/chatbot/ask', async (req, res) => {
+    const settings = getPublicSettingsMap();
+    const fallbackReply = buildStandardChatbotFallback(settings);
+
+    const ip =
+      String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown')
+        .split(',')[0]
+        .trim() || 'unknown';
+
+    const rawMessage = req.body?.message;
+    const visitorMessage = sanitizeChatbotText(rawMessage, CHATBOT_MAX_MESSAGE_LENGTH);
+    const sessionId =
+      sanitizeChatbotText(req.body?.session_id, 80) ||
+      `sess_${crypto.createHash('sha256').update(ip).digest('hex').slice(0, 12)}`;
+
+    if (!visitorMessage) {
+      res.status(400).json({
+        message: 'Please enter a question (up to 200 characters).',
+      });
+      return;
+    }
+
+    const nowMs = Date.now();
+    // Per-IP message limit: max 10 messages / minute
+    const msgLimit = checkChatbotIpMessageLimit(chatbotIpRateStore, ip, nowMs);
+    if (!msgLimit.allowed) {
+      res.json({
+        reply: fallbackReply,
+        source: 'fallback',
+        ai_label: null,
+        rate_limited: true,
+      });
+      return;
+    }
+
+    // 1. Load active public FAQs (visible to "all") and try local FAQ matching first
+    const publicFaqs = db
+      .prepare(
+        `SELECT id, question, answer, COALESCE(keywords, '') AS keywords
+         FROM faqs
+         WHERE is_active = 1 AND LOWER(audience) = 'all'
+         ORDER BY sort_order ASC, id ASC`
+      )
+      .all() as { id: number; question: string; answer: string; keywords: string }[];
+
+    const faqMatch = matchFaqQuestion(visitorMessage, publicFaqs);
+    if (faqMatch.matched && faqMatch.faq) {
+      res.json({
+        reply: sanitizeChatbotText(faqMatch.faq.answer),
+        source: 'faq',
+        matched_faq_id: faqMatch.faq.id,
+        matched_question: sanitizeChatbotText(faqMatch.faq.question),
+        ai_label: null,
+      });
+      return;
+    }
+
+    // 2. Otherwise, check if Gemini AI fallback is enabled and within per-IP & global daily limits
+    const aiEnabled = isChatbotAiConfigured(process.env);
+    const dailyCap = parseChatbotDailyCap(process.env.CHATBOT_AI_DAILY_CAP);
+    const todayUsageRow = db
+      .prepare("SELECT COUNT(*) AS cnt FROM chat_ai_usage WHERE date(created_at) = date('now')")
+      .get() as { cnt: number };
+    const callsToday = Number(todayUsageRow?.cnt || 0);
+
+    if (!aiEnabled || callsToday >= dailyCap) {
+      recordUnansweredQuestion(sessionId, visitorMessage);
+      res.json({
+        reply: fallbackReply,
+        source: 'fallback',
+        ai_label: null,
+      });
+      return;
+    }
+
+    const ipAiLimit = checkChatbotIpAiLimit(chatbotIpRateStore, ip, nowMs);
+    if (!ipAiLimit.allowed) {
+      recordUnansweredQuestion(sessionId, visitorMessage);
+      res.json({
+        reply: fallbackReply,
+        source: 'fallback',
+        ai_label: null,
+      });
+      return;
+    }
+
+    // Build context from public FAQs ONLY (question + answer; no prices, no stock, no user info)
+    const faqContextBlock = publicFaqs
+      .map((f, idx) => {
+        const q = sanitizeChatbotText(f.question);
+        const a = sanitizeChatbotText(f.answer);
+        return `Q${idx + 1}: ${q}\nA${idx + 1}: ${a}`;
+      })
+      .join('\n\n');
+
+    const fullSystemInstruction = `${CHATBOT_SYSTEM_PROMPT}\n\nPublic FAQ Context:\n${
+      faqContextBlock || 'No public FAQs available.'
+    }`;
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const ai = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error('CHATBOT_AI_TIMEOUT'));
+        }, 8000);
+      });
+
+      // Visitor's message (max 200 chars) sent as the user turn only
+      const aiResponse = await Promise.race([
+        ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: visitorMessage,
+          config: {
+            systemInstruction: fullSystemInstruction,
+          },
+        }),
+        timeoutPromise,
+      ]);
+
+      const rawText = aiResponse?.text || '';
+      const cleanAiReply = sanitizeChatbotText(rawText, 600);
+
+      const tokensIn =
+        typeof aiResponse?.usageMetadata?.promptTokenCount === 'number'
+          ? aiResponse.usageMetadata.promptTokenCount
+          : null;
+      const tokensOut =
+        typeof aiResponse?.usageMetadata?.candidatesTokenCount === 'number'
+          ? aiResponse.usageMetadata.candidatesTokenCount
+          : null;
+
+      // Log AI usage in chat_ai_usage
+      db.prepare(
+        `INSERT INTO chat_ai_usage (session_id, tokens_in, tokens_out, created_at)
+         VALUES (?, ?, ?, datetime('now'))`
+      ).run(sessionId, tokensIn, tokensOut);
+
+      if (!cleanAiReply) {
+        recordUnansweredQuestion(sessionId, visitorMessage);
+        res.json({
+          reply: fallbackReply,
+          source: 'fallback',
+          ai_label: null,
+        });
+        return;
+      }
+
+      // If the AI indicates the answer is not in the FAQ context, also save to chat_unanswered for the Admin
+      if (
+        /i don'?t know|not in the (provided )?context|outside (this )?scope|couldn'?t find/i.test(
+          cleanAiReply
+        )
+      ) {
+        recordUnansweredQuestion(sessionId, visitorMessage);
+      }
+
+      res.json({
+        reply: cleanAiReply,
+        source: 'ai',
+        ai_label: CHATBOT_AI_SUBTLE_LABEL,
+      });
+    } catch {
+      // Never log or expose the API key or raw upstream API error
+      recordUnansweredQuestion(sessionId, visitorMessage);
+      res.json({
+        reply: fallbackReply,
+        source: 'fallback',
+        ai_label: null,
+      });
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+  });
+
   api.post('/auth/login', (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) {
@@ -446,21 +829,169 @@ async function startServer() {
   });
 
   // ===== NOTIFICATIONS =====
+  const ensureActivePromoNotificationsForFranchisee = (
+    userId: number,
+    franchiseeId?: number
+  ) => {
+    if (!franchiseeId) return;
+    const activePromos = db
+      .prepare(
+        `SELECT id, name, promo_type, tier_basis, discount_type, discount_value,
+                min_order_amount, min_quantity, buy_quantity, free_quantity,
+                free_delivery, max_discount_cap, start_date, end_date, recurring_monthly
+         FROM promos
+         WHERE status = 'Active'
+           AND date(start_date) <= date('now')
+           AND (date(end_date) >= date('now') OR COALESCE(recurring_monthly, 0) = 1)`
+      )
+      .all() as any[];
+
+    for (const p of activePromos) {
+      const targets = db
+        .prepare('SELECT franchisee_id FROM promo_targets WHERE promo_id = ?')
+        .all(p.id) as { franchisee_id: number }[];
+      const isTargeted =
+        targets.length === 0 ||
+        targets.some((t) => Number(t.franchisee_id) === Number(franchiseeId));
+      if (!isTargeted) continue;
+
+      const existingNotif = db
+        .prepare(
+          "SELECT id FROM notifications WHERE user_id = ? AND type = 'promo' AND related_id = ?"
+        )
+        .get(userId, p.id);
+      if (!existingNotif) {
+        const preview = formatPromoHowItWorks(p);
+        notifyUser(
+          userId,
+          `New Active Promo: ${p.name}`,
+          `${preview}. Valid until ${String(p.end_date).slice(0, 10)}. Discount applies automatically at checkout!`,
+          'promo',
+          p.id
+        );
+      }
+    }
+  };
+
+  api.get('/notifications/summary', (req, res) => {
+    const user = req.user!;
+    if (user.role === 'franchisee' && user.franchiseeId) {
+      ensureActivePromoNotificationsForFranchisee(user.id, user.franchiseeId);
+    }
+
+    const unreadRow = db
+      .prepare('SELECT COUNT(*) AS unread FROM notifications WHERE user_id = ? AND is_read = 0')
+      .get(user.id) as { unread: number };
+    const unread_total = Number(unreadRow?.unread || 0);
+
+    const sections: Record<string, number> = {
+      notifications: unread_total,
+      [`/${user.role}/notifications`]: unread_total,
+    };
+
+    if (user.role === 'admin') {
+      const pendingFranchisees = (
+        db
+          .prepare("SELECT COUNT(*) AS cnt FROM franchisees WHERE status = 'Pending'")
+          .get() as { cnt: number }
+      ).cnt;
+      const placedOrders = (
+        db
+          .prepare("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'Placed'")
+          .get() as { cnt: number }
+      ).cnt;
+      const lowStockSkus = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS cnt
+             FROM inventory i
+             JOIN products p ON p.id = i.product_id
+             JOIN warehouses w ON w.id = i.warehouse_id
+             WHERE p.is_active = 1 AND w.is_active = 1 AND i.quantity <= p.low_stock_threshold`
+          )
+          .get() as { cnt: number }
+      ).cnt;
+
+      sections.pending_approvals = pendingFranchisees;
+      sections['/admin/pending-franchisees'] = pendingFranchisees;
+      sections.replenishment_orders = placedOrders;
+      sections['/admin/orders'] = placedOrders;
+      sections.warehouse_inventory = lowStockSkus;
+      sections['/admin/inventory'] = lowStockSkus;
+    } else if (user.role === 'agent') {
+      const unseenApprovals = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = ? AND is_read = 0 AND type = 'approval'"
+          )
+          .get(user.id) as { cnt: number }
+      ).cnt;
+
+      sections.franchisees = unseenApprovals;
+      sections.my_recruits = unseenApprovals;
+      sections['/agent/dashboard'] = unseenApprovals;
+    } else if (user.role === 'franchisee') {
+      const unseenOrderChanges = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = ? AND is_read = 0 AND type IN ('order', 'delivery', 'near')"
+          )
+          .get(user.id) as { cnt: number }
+      ).cnt;
+      const unseenPromos = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = ? AND is_read = 0 AND type = 'promo'"
+          )
+          .get(user.id) as { cnt: number }
+      ).cnt;
+
+      sections.order_history = unseenOrderChanges;
+      sections['/franchisee/orders'] = unseenOrderChanges;
+      sections.product_catalog = unseenPromos;
+      sections.promos = unseenPromos;
+      sections['/franchisee/catalog'] = unseenPromos;
+    } else if (user.role === 'delivery') {
+      const assignedDeliveries = (
+        db
+          .prepare(
+            "SELECT COUNT(*) AS cnt FROM deliveries WHERE delivery_staff_id = ? AND status = 'Assigned'"
+          )
+          .get(user.id) as { cnt: number }
+      ).cnt;
+
+      sections.assigned_deliveries = assignedDeliveries;
+      sections.deliveries = assignedDeliveries;
+      sections['/delivery/dashboard'] = assignedDeliveries;
+    }
+
+    res.json({
+      unread_total,
+      sections,
+    });
+  });
+
   api.get('/notifications', (req, res) => {
+    const user = req.user!;
+    if (user.role === 'franchisee' && user.franchiseeId) {
+      ensureActivePromoNotificationsForFranchisee(user.id, user.franchiseeId);
+    }
+
     const { page, limit, offset } = parsePagination(req.query);
     const totalRow = db
       .prepare('SELECT COUNT(*) AS total FROM notifications WHERE user_id = ?')
-      .get(req.user!.id) as { total: number };
+      .get(user.id) as { total: number };
     const unreadRow = db
       .prepare('SELECT COUNT(*) AS unread FROM notifications WHERE user_id = ? AND is_read = 0')
-      .get(req.user!.id) as { unread: number };
+      .get(user.id) as { unread: number };
     const rows = db
       .prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?')
-      .all(req.user!.id, limit, offset);
+      .all(user.id, limit, offset);
 
     res.json({
       data: rows,
       unreadCount: unreadRow.unread,
+      unread_total: unreadRow.unread,
       pagination: {
         page,
         limit,
@@ -470,7 +1001,7 @@ async function startServer() {
     });
   });
 
-  api.patch('/notifications/:id/read', (req, res) => {
+  const handleMarkNotificationRead = (req: Request, res: Response) => {
     const { id } = req.params;
     if (id === 'all') {
       db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?').run(req.user!.id);
@@ -481,6 +1012,238 @@ async function startServer() {
       );
     }
     res.json({ message: 'Marked as read.' });
+  };
+
+  api.post('/notifications/read-all', (req, res) => {
+    const user = req.user!;
+    const pathParam = req.body?.path ? String(req.body.path) : '';
+    const explicitTypes: string[] = Array.isArray(req.body?.types)
+      ? req.body.types.map((t: unknown) => String(t))
+      : pathParam
+      ? getNotificationTypesForRoute(user.role, pathParam)
+      : ['*'];
+
+    if (explicitTypes.includes('*')) {
+      db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0').run(
+        user.id
+      );
+    } else if (explicitTypes.length > 0) {
+      const placeholders = explicitTypes.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0 AND type IN (${placeholders})`
+      ).run(user.id, ...explicitTypes);
+    }
+    res.json({ message: 'Notifications marked as read.' });
+  });
+
+  api.post('/notifications/:id/read', handleMarkNotificationRead);
+  api.patch('/notifications/:id/read', handleMarkNotificationRead);
+
+  // ===== ADMIN: PUBLIC LANDING PAGE SETTINGS =====
+  api.get('/admin/settings', authorize('admin'), (_req, res) => {
+    res.json(getPublicSettingsMap());
+  });
+
+  api.put('/admin/settings', authorize('admin'), (req, res) => {
+    const { contact_email, contact_phone, show_public_prices } = req.body || {};
+    const upsert = db.prepare(
+      `INSERT INTO system_settings (key, value, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+    );
+
+    if (typeof contact_email === 'string' && contact_email.trim()) {
+      upsert.run('contact_email', sanitizePublicText(contact_email));
+    }
+    if (typeof contact_phone === 'string' && contact_phone.trim()) {
+      upsert.run('contact_phone', sanitizePublicText(contact_phone));
+    }
+    if (show_public_prices !== undefined) {
+      upsert.run('show_public_prices', show_public_prices ? '1' : '0');
+    }
+
+    logActivity(
+      req.user!.id,
+      'PUBLIC_SETTINGS_UPDATED',
+      'settings',
+      null,
+      'Updated public landing page settings'
+    );
+    res.json({
+      message: 'Public landing page settings saved.',
+      ...getPublicSettingsMap(),
+    });
+  });
+
+  // ===== ADMIN: CHATBOT FAQs, UNANSWERED QUESTIONS & GEMINI AI FALLBACK STATUS =====
+  api.get('/admin/chatbot-faqs', authorize('admin'), (_req, res) => {
+    const aiEnabled = isChatbotAiConfigured(process.env);
+    const hasApiKey = Boolean(
+      process.env.GEMINI_API_KEY &&
+        process.env.GEMINI_API_KEY.trim() &&
+        process.env.GEMINI_API_KEY.trim() !== 'MY_GEMINI_API_KEY'
+    );
+    const envFlagEnabled = String(process.env.CHATBOT_AI_ENABLED || '').trim() === 'true';
+    const dailyCap = parseChatbotDailyCap(process.env.CHATBOT_AI_DAILY_CAP);
+
+    const todayRow = db
+      .prepare(
+        `SELECT COUNT(*) AS calls_today,
+                COALESCE(SUM(tokens_in), 0) AS tokens_in_today,
+                COALESCE(SUM(tokens_out), 0) AS tokens_out_today
+         FROM chat_ai_usage
+         WHERE date(created_at) = date('now')`
+      )
+      .get() as { calls_today: number; tokens_in_today: number; tokens_out_today: number };
+
+    const totalRow = db
+      .prepare('SELECT COUNT(*) AS total_calls FROM chat_ai_usage')
+      .get() as { total_calls: number };
+
+    const faqs = db
+      .prepare(
+        `SELECT id, question, answer, COALESCE(keywords, '') AS keywords, audience, sort_order, is_active, created_at
+         FROM faqs
+         ORDER BY sort_order ASC, id ASC`
+      )
+      .all();
+
+    const unanswered = db
+      .prepare(
+        `SELECT id, session_id, question, status, resolved_faq_id, created_at
+         FROM chat_unanswered
+         ORDER BY CASE WHEN status = 'Open' THEN 0 ELSE 1 END ASC, id DESC
+         LIMIT 100`
+      )
+      .all();
+
+    res.json({
+      ai_status: {
+        enabled: aiEnabled,
+        has_api_key: hasApiKey,
+        env_flag_enabled: envFlagEnabled,
+        calls_today: Number(todayRow?.calls_today || 0),
+        daily_cap: dailyCap,
+        tokens_in_today: Number(todayRow?.tokens_in_today || 0),
+        tokens_out_today: Number(todayRow?.tokens_out_today || 0),
+        total_calls_all_time: Number(totalRow?.total_calls || 0),
+      },
+      faqs,
+      unanswered,
+    });
+  });
+
+  api.post('/admin/chatbot-faqs', authorize('admin'), (req, res) => {
+    const {
+      question,
+      answer,
+      keywords,
+      audience = 'all',
+      sort_order = 0,
+      is_active = 1,
+      unanswered_id,
+    } = req.body || {};
+
+    const cleanQ = sanitizeChatbotText(question, 300);
+    const cleanA = sanitizeChatbotText(answer, 1200);
+    const cleanK = sanitizeChatbotText(keywords || '', 300);
+    const cleanAud = sanitizeChatbotText(audience || 'all', 40) || 'all';
+    const orderNum = Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0;
+    const activeInt = is_active ? 1 : 0;
+
+    if (!cleanQ || !cleanA) {
+      res.status(400).json({ message: 'Both question and answer are required.' });
+      return;
+    }
+
+    const result = db
+      .prepare(
+        `INSERT INTO faqs (question, answer, keywords, audience, sort_order, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+      )
+      .run(cleanQ, cleanA, cleanK, cleanAud, orderNum, activeInt);
+
+    const newFaqId = Number(result.lastInsertRowid);
+
+    if (unanswered_id && Number.isFinite(Number(unanswered_id))) {
+      db.prepare(
+        `UPDATE chat_unanswered
+         SET status = 'Converted', resolved_faq_id = ?
+         WHERE id = ?`
+      ).run(newFaqId, Number(unanswered_id));
+    }
+
+    logActivity(
+      req.user!.id,
+      'FAQ_CREATED',
+      'faq',
+      newFaqId,
+      `Created chatbot FAQ: ${cleanQ.slice(0, 60)}`
+    );
+
+    res.status(201).json({
+      message: 'Chatbot FAQ created.',
+      id: newFaqId,
+    });
+  });
+
+  api.put('/admin/chatbot-faqs/:id', authorize('admin'), (req, res) => {
+    const faqId = Number(req.params.id);
+    const existing = db.prepare('SELECT id FROM faqs WHERE id = ?').get(faqId);
+    if (!existing) {
+      res.status(404).json({ message: 'FAQ not found.' });
+      return;
+    }
+
+    const {
+      question,
+      answer,
+      keywords,
+      audience = 'all',
+      sort_order = 0,
+      is_active = 1,
+    } = req.body || {};
+
+    const cleanQ = sanitizeChatbotText(question, 300);
+    const cleanA = sanitizeChatbotText(answer, 1200);
+    const cleanK = sanitizeChatbotText(keywords || '', 300);
+    const cleanAud = sanitizeChatbotText(audience || 'all', 40) || 'all';
+    const orderNum = Number.isFinite(Number(sort_order)) ? Number(sort_order) : 0;
+    const activeInt = is_active ? 1 : 0;
+
+    if (!cleanQ || !cleanA) {
+      res.status(400).json({ message: 'Both question and answer are required.' });
+      return;
+    }
+
+    db.prepare(
+      `UPDATE faqs
+       SET question = ?, answer = ?, keywords = ?, audience = ?, sort_order = ?, is_active = ?
+       WHERE id = ?`
+    ).run(cleanQ, cleanA, cleanK, cleanAud, orderNum, activeInt, faqId);
+
+    logActivity(
+      req.user!.id,
+      'FAQ_UPDATED',
+      'faq',
+      faqId,
+      `Updated chatbot FAQ #${faqId}`
+    );
+
+    res.json({ message: 'Chatbot FAQ updated.' });
+  });
+
+  api.delete('/admin/chatbot-faqs/:id', authorize('admin'), (req, res) => {
+    const faqId = Number(req.params.id);
+    db.prepare('DELETE FROM faqs WHERE id = ?').run(faqId);
+    logActivity(req.user!.id, 'FAQ_DELETED', 'faq', faqId, `Deleted chatbot FAQ #${faqId}`);
+    res.json({ message: 'Chatbot FAQ deleted.' });
+  });
+
+  api.delete('/admin/chatbot-unanswered/:id', authorize('admin'), (req, res) => {
+    const id = Number(req.params.id);
+    db.prepare('DELETE FROM chat_unanswered WHERE id = ?').run(id);
+    res.json({ message: 'Unanswered question removed.' });
   });
 
   // ===== WAREHOUSES (Available even when locked so Admin can complete Warehouse Setup) =====

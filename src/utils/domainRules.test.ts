@@ -17,6 +17,27 @@ import {
   filterEligiblePopupPromos,
   formatPromoLimitNote,
   hasPromoRulesOrDatesChanged,
+  formatBadgeCount,
+  formatRelativeTimeAgo,
+  resolveNotificationTargetRoute,
+  getNotificationTypesForRoute,
+  getSidebarBadgeCount,
+  sanitizePublicText,
+  extractGeneralAreaFromAddress,
+  projectPublicProduct,
+  projectPublicStore,
+  projectPublicPromo,
+  CHATBOT_SYSTEM_PROMPT,
+  CHATBOT_AI_SUBTLE_LABEL,
+  sanitizeChatbotText,
+  matchFaqQuestion,
+  isChatbotAiConfigured,
+  parseChatbotDailyCap,
+  buildStandardChatbotFallback,
+  buildChatbotFaqContextPrompt,
+  checkChatbotIpMessageLimit,
+  checkChatbotIpAiLimit,
+  ChatbotIpBucket,
   PromoDefinition,
 } from './domainRules';
 
@@ -328,6 +349,211 @@ test('filterEligiblePopupPromos, formatPromoLimitNote, and hasPromoRulesOrDatesC
   );
 });
 
+test('formatBadgeCount, formatRelativeTimeAgo, resolveNotificationTargetRoute, and getSidebarBadgeCount handle all role rules', () => {
+  // Badge count formatting: hidden for 0, exact 1..9, "9+" above 9
+  assert.equal(formatBadgeCount(0), null);
+  assert.equal(formatBadgeCount(-2), null);
+  assert.equal(formatBadgeCount(3), '3');
+  assert.equal(formatBadgeCount(9), '9');
+  assert.equal(formatBadgeCount(10), '9+');
+  assert.equal(formatBadgeCount(42), '9+');
 
+  // Relative time ago formatting
+  const baseMs = Date.parse('2026-11-20T12:00:00Z');
+  assert.equal(formatRelativeTimeAgo('2026-11-20 11:59:30', baseMs), 'Just now');
+  assert.equal(formatRelativeTimeAgo('2026-11-20 11:55:00', baseMs), '5m ago');
+  assert.equal(formatRelativeTimeAgo('2026-11-20 09:00:00', baseMs), '3h ago');
+  assert.equal(formatRelativeTimeAgo('2026-11-18 12:00:00', baseMs), '2d ago');
 
+  // Route target resolution per role & notification type
+  assert.equal(resolveNotificationTargetRoute('admin', 'approval', 5).path, '/admin/pending-franchisees');
+  assert.equal(resolveNotificationTargetRoute('admin', 'order', 12).path, '/admin/orders');
+  assert.equal(resolveNotificationTargetRoute('admin', 'low_stock', 3).path, '/admin/inventory');
+  assert.equal(resolveNotificationTargetRoute('agent', 'approval', 5).path, '/agent/dashboard');
+  assert.equal(resolveNotificationTargetRoute('franchisee', 'promo', 9).path, '/franchisee/catalog');
+  assert.equal(resolveNotificationTargetRoute('franchisee', 'order', 18).path, '/franchisee/orders');
+  assert.equal(resolveNotificationTargetRoute('delivery', 'delivery', 7).path, '/delivery/dashboard');
 
+  // Route -> notification types to mark read on open
+  assert.deepEqual(getNotificationTypesForRoute('admin', '/admin/pending-franchisees'), ['approval']);
+  assert.deepEqual(getNotificationTypesForRoute('agent', '/agent/dashboard'), ['approval']);
+  assert.deepEqual(getNotificationTypesForRoute('franchisee', '/franchisee/catalog'), ['promo']);
+  assert.deepEqual(getNotificationTypesForRoute('franchisee', '/franchisee/orders'), ['order', 'delivery', 'near']);
+  assert.deepEqual(getNotificationTypesForRoute('delivery', '/delivery/dashboard'), ['delivery', 'order', 'near']);
+  assert.deepEqual(getNotificationTypesForRoute('admin', '/admin/notifications'), ['*']);
+
+  // Sidebar badge lookup
+  const adminSummary = {
+    unread_total: 4,
+    sections: {
+      pending_approvals: 2,
+      replenishment_orders: 5,
+      warehouse_inventory: 11,
+    },
+  };
+  assert.equal(getSidebarBadgeCount('admin', '/admin/pending-franchisees', adminSummary), 2);
+  assert.equal(getSidebarBadgeCount('admin', '/admin/orders', adminSummary), 5);
+  assert.equal(getSidebarBadgeCount('admin', '/admin/inventory', adminSummary), 11);
+  assert.equal(getSidebarBadgeCount('admin', '/admin/notifications', adminSummary), 4);
+  assert.equal(getSidebarBadgeCount('admin', '/admin/dashboard', adminSummary), 0);
+});
+
+test('public endpoint projections strip private fields, hide prices unless enabled, and extract general store area only', () => {
+  assert.equal(sanitizePublicText('<script>alert(1)</script>AICE Choco'), 'alert(1)AICE Choco');
+  assert.equal(
+    extractGeneralAreaFromAddress('124 Espana Blvd, Sampaloc, Manila'),
+    'Sampaloc, Manila'
+  );
+  assert.equal(
+    extractGeneralAreaFromAddress('88 Aurora Blvd, Cubao, Quezon City'),
+    'Cubao, Quezon City'
+  );
+
+  const rawProd = {
+    id: 5,
+    name: 'AICE Mochi Klepon',
+    flavor: 'Pandan Coconut',
+    size: '40 pcs / box',
+    image_url: '/uploads/products/mochi.jpg',
+    category_name: 'Mochi Series',
+    price: 540,
+    stock_qty: 95,
+    low_stock_threshold: 15,
+    sku: 'AICE-MK-05',
+  };
+
+  const prodWithoutPrice = projectPublicProduct(rawProd, false);
+  assert.equal('price' in prodWithoutPrice, false);
+  assert.equal('stock_qty' in (prodWithoutPrice as any), false);
+  assert.equal('sku' in (prodWithoutPrice as any), false);
+  assert.equal(prodWithoutPrice.category, 'Mochi Series');
+
+  const prodWithPrice = projectPublicProduct(rawProd, true);
+  assert.equal(prodWithPrice.price, 540);
+
+  const rawStore = {
+    id: 1,
+    user_id: 4,
+    agent_id: 1,
+    owner_name: 'Juan Dela Cruz',
+    store_name: 'AICE Sampaloc Corner Store',
+    address: '124 Espana Blvd, Sampaloc, Manila',
+    contact_number: '09173333333',
+    username: 'franchisee_test',
+    lat: 14.6042,
+    lng: 120.9921,
+  };
+  const publicStore = projectPublicStore(rawStore);
+  assert.deepEqual(publicStore, {
+    id: 1,
+    store_name: 'AICE Sampaloc Corner Store',
+    area: 'Sampaloc, Manila',
+    lat: 14.6042,
+    lng: 120.9921,
+  });
+  assert.equal('owner_name' in (publicStore as any), false);
+  assert.equal('contact_number' in (publicStore as any), false);
+  assert.equal('username' in (publicStore as any), false);
+  assert.equal('address' in (publicStore as any), false);
+
+  const publicPromo = projectPublicPromo({
+    id: 2,
+    name: 'Freezer Bundle Promo',
+    description: 'Save on bulk restock',
+    promo_type: 'buy_x_get_y',
+    buy_quantity: 5,
+    free_quantity: 1,
+    end_date: '2026-12-15',
+  });
+  assert.equal(publicPromo.name, 'Freezer Bundle Promo');
+  assert.equal(publicPromo.valid_until, '2026-12-15');
+  assert.equal(publicPromo.short_description.includes('Buy 5 boxes'), true);
+});
+
+test('public chatbot FAQ matching, Gemini AI fallback config, rate limits, and output sanitization work accurately', () => {
+  const sampleFaqs = [
+    {
+      id: 1,
+      question: 'How do approved franchisees place stock-replenishment orders?',
+      answer:
+        'Approved franchisees sign in to their store workspace, select an active origin warehouse, add AICE cartons to their replenishment cart, and submit online.',
+    },
+    {
+      id: 2,
+      question: 'How can I apply to become an AICE franchisee?',
+      answer:
+        'There is no public self sign-up or online application form. All new franchisee applications are registered on-site by accredited AICE field agents.',
+    },
+    {
+      id: 3,
+      question: 'How does live delivery tracking work?',
+      answer:
+        'Once an order is confirmed and assigned to a delivery rider, franchisees can open the live tracking map.',
+    },
+  ];
+
+  // 1. FAQ match succeeds on exact or paraphrased in-scope question
+  const match1 = matchFaqQuestion('How can I apply to become an AICE franchisee?', sampleFaqs);
+  assert.equal(match1.matched, true);
+  assert.equal(match1.faq?.id, 2);
+
+  const match2 = matchFaqQuestion('how do franchisees place stock replenishment orders?', sampleFaqs);
+  assert.equal(match2.matched, true);
+  assert.equal(match2.faq?.id, 1);
+
+  // 2. Unrelated question does not pass threshold
+  const miss = matchFaqQuestion('What is the atomic weight of molybdenum in space?', sampleFaqs);
+  assert.equal(miss.matched, false);
+  assert.equal(miss.faq, null);
+
+  // 3. HTML stripping and 200-char limit
+  const dirty = '<script>alert("xss")</script><b>Hello</b> <img src=x onerror=alert(1)> ' + 'a'.repeat(250);
+  const cleaned = sanitizeChatbotText(dirty, 200);
+  assert.equal(cleaned.includes('<'), false);
+  assert.equal(cleaned.includes('>'), false);
+  assert.equal(cleaned.includes('alert("xss")'), false);
+  assert.equal(cleaned.length <= 200, true);
+
+  // 4. AI configuration requires BOTH CHATBOT_AI_ENABLED === "true" and valid GEMINI_API_KEY
+  assert.equal(isChatbotAiConfigured({}), false);
+  assert.equal(isChatbotAiConfigured({ GEMINI_API_KEY: 'AIzaRealKey', CHATBOT_AI_ENABLED: 'false' }), false);
+  assert.equal(isChatbotAiConfigured({ GEMINI_API_KEY: '', CHATBOT_AI_ENABLED: 'true' }), false);
+  assert.equal(isChatbotAiConfigured({ GEMINI_API_KEY: 'MY_GEMINI_API_KEY', CHATBOT_AI_ENABLED: 'true' }), false);
+  assert.equal(isChatbotAiConfigured({ GEMINI_API_KEY: 'AIzaRealKey', CHATBOT_AI_ENABLED: 'true' }), true);
+
+  // 5. Daily cap defaults to 200 and parses custom valid numbers
+  assert.equal(parseChatbotDailyCap(undefined), 200);
+  assert.equal(parseChatbotDailyCap('invalid'), 200);
+  assert.equal(parseChatbotDailyCap('350'), 350);
+
+  // 6. Standard fallback reply includes contact details and required phrase
+  const fallback = buildStandardChatbotFallback({
+    contact_email: 'franchising@aicehub.local',
+    contact_phone: '+63 (02) 8888-2423',
+  });
+  assert.equal(fallback.includes("I couldn't find that, please contact us"), true);
+  assert.equal(fallback.includes('franchising@aicehub.local'), true);
+  assert.equal(fallback.includes('+63 (02) 8888-2423'), true);
+
+  // 7. Context prompt includes only public FAQs and visitor message (max 200 chars)
+  const prompt = buildChatbotFaqContextPrompt(sampleFaqs, 'Can I sign up online?');
+  assert.equal(prompt.includes('Public FAQ Context:'), true);
+  assert.equal(prompt.includes('Can I sign up online?'), true);
+  assert.equal(CHATBOT_SYSTEM_PROMPT.includes('Keep answers under 80 words'), true);
+  assert.equal(CHATBOT_AI_SUBTLE_LABEL, 'AI-generated, may be inaccurate');
+
+  // 8. Per-IP limits: 10 messages/min and 5 AI calls/hour
+  const rateMap = new Map<string, ChatbotIpBucket>();
+  const now = 1_700_000_000_000;
+  for (let i = 0; i < 10; i++) {
+    assert.equal(checkChatbotIpMessageLimit(rateMap, '127.0.0.1', now + i * 100).allowed, true);
+  }
+  assert.equal(checkChatbotIpMessageLimit(rateMap, '127.0.0.1', now + 2000).allowed, false);
+  // After 61 seconds, messages are allowed again
+  assert.equal(checkChatbotIpMessageLimit(rateMap, '127.0.0.1', now + 62_000).allowed, true);
+
+  for (let i = 0; i < 5; i++) {
+    assert.equal(checkChatbotIpAiLimit(rateMap, '127.0.0.1', now + i * 100).allowed, true);
+  }
+  assert.equal(checkChatbotIpAiLimit(rateMap, '127.0.0.1', now + 2000).allowed, false);
+});

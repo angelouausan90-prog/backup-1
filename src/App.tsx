@@ -4,6 +4,13 @@ import { RoleName, User } from './types';
 import { StoreMapView } from './components/StoreMapView';
 import { NotificationsView } from './components/NotificationsView';
 import { FranchiseePromoPopupModal } from './components/FranchiseePromoPopupModal';
+import { NotificationBellDropdown } from './components/NotificationBellDropdown';
+import {
+  formatBadgeCount,
+  getNotificationTypesForRoute,
+  getSidebarBadgeCount,
+  NotificationSummaryPayload,
+} from './utils/domainRules';
 import {
   AdminDashboard,
   WarehouseSetupView,
@@ -39,6 +46,8 @@ import {
   DeliveryAssignedView,
   DeliveryHistoryView,
 } from './pages/delivery/DeliveryPages';
+import { PublicLandingPage } from './pages/public/PublicLandingPage';
+import { ChatbotFaqsView } from './pages/admin/ChatbotFaqsView';
 
 interface NavItem {
   label: string;
@@ -60,6 +69,7 @@ const SIDEBAR_BY_ROLE: Record<RoleName, NavItem[]> = {
     { label: 'Warehouse Inventory', path: '/admin/inventory' },
     { label: 'Replenishment Orders', path: '/admin/orders' },
     { label: 'Agent Commissions', path: '/admin/commissions' },
+    { label: 'Chatbot FAQs', path: '/admin/chatbot-faqs' },
     { label: 'Reports & Audit Log', path: '/admin/reports' },
     { label: 'Store Map', path: '/admin/store-map' },
     { label: 'Notifications', path: '/admin/notifications' },
@@ -108,9 +118,14 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [hasWarehouse, setHasWarehouse] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
-  const [route, setRoute] = useState<string>('/login');
+  const [route, setRoute] = useState<string>(() => {
+    const p = typeof window !== 'undefined' ? window.location.pathname : '/';
+    return p === '/login' ? '/login' : p || '/';
+  });
   const [trackingOrderId, setTrackingOrderId] = useState<number | null>(null);
   const [unreadCount, setUnreadCount] = useState<number>(0);
+  const [notificationSummary, setNotificationSummary] =
+    useState<NotificationSummaryPayload | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
   // Login form state
@@ -126,11 +141,53 @@ export default function App() {
   const [pwdError, setPwdError] = useState('');
   const [pwdBusy, setPwdBusy] = useState(false);
 
+  const syncRouteWithHistory = (nextPath: string, replace = false) => {
+    setRoute(nextPath);
+    if (typeof window !== 'undefined' && window.location.pathname !== nextPath) {
+      if (replace) {
+        window.history.replaceState({}, '', nextPath);
+      } else {
+        window.history.pushState({}, '', nextPath);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const onPopState = () => {
+      const p = window.location.pathname || '/';
+      setRoute(p);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
   const loadUnreadCount = () => {
+    const token = localStorage.getItem('aice_token');
+    if (!token) return;
     api
-      .get('/notifications?limit=1')
-      .then((res) => setUnreadCount(res.unreadCount || 0))
+      .get('/notifications/summary')
+      .then((res) => {
+        if (res && typeof res.unread_total === 'number') {
+          setUnreadCount(res.unread_total);
+          setNotificationSummary({
+            unread_total: res.unread_total,
+            sections: res.sections || {},
+          });
+        }
+      })
       .catch(() => {});
+  };
+
+  const markRouteNotificationsRead = (role: RoleName, targetPath: string) => {
+    const types = getNotificationTypesForRoute(role, targetPath);
+    if (types.length === 0) {
+      loadUnreadCount();
+      return;
+    }
+    api
+      .post('/notifications/read-all', { path: targetPath })
+      .then(() => loadUnreadCount())
+      .catch(() => loadUnreadCount());
   };
 
   const refreshSession = async () => {
@@ -143,6 +200,11 @@ export default function App() {
         // ignore
       }
       setUser(null);
+      setNotificationSummary(null);
+      setUnreadCount(0);
+      const currentPath =
+        typeof window !== 'undefined' ? window.location.pathname : '/';
+      syncRouteWithHistory(currentPath === '/login' ? '/login' : '/', true);
       setLoading(false);
       return;
     }
@@ -154,19 +216,28 @@ export default function App() {
       setUser(u);
       setHasWarehouse(wh);
       if (u.must_change_password) {
-        setRoute('/change-password');
+        syncRouteWithHistory('/change-password', true);
       } else {
-        setRoute((prev) =>
-          prev === '/login' || prev === '/change-password' || !prev.startsWith(`/${u.role}`)
+        const currentPath =
+          typeof window !== 'undefined' ? window.location.pathname : route;
+        const nextRoute =
+          currentPath === '/' ||
+          currentPath === '/login' ||
+          currentPath === '/change-password' ||
+          !currentPath.startsWith(`/${u.role}`)
             ? defaultRouteForRole(u.role, wh)
-            : prev
-        );
+            : currentPath;
+        syncRouteWithHistory(nextRoute, true);
         loadUnreadCount();
       }
     } catch {
       localStorage.removeItem('aice_token');
       setUser(null);
-      setRoute('/login');
+      setNotificationSummary(null);
+      setUnreadCount(0);
+      const currentPath =
+        typeof window !== 'undefined' ? window.location.pathname : '/';
+      syncRouteWithHistory(currentPath === '/login' ? '/login' : '/', true);
     } finally {
       setLoading(false);
     }
@@ -176,31 +247,78 @@ export default function App() {
     refreshSession();
   }, []);
 
+  // Redirect logged-in users if route ever lands on "/" or "/login"
+  useEffect(() => {
+    if (!loading && user) {
+      if (user.must_change_password && route !== '/change-password') {
+        syncRouteWithHistory('/change-password', true);
+      } else if (
+        !user.must_change_password &&
+        (route === '/' || route === '/login' || !route.startsWith(`/${user.role}`))
+      ) {
+        syncRouteWithHistory(defaultRouteForRole(user.role, hasWarehouse), true);
+      }
+    }
+  }, [loading, user, route, hasWarehouse]);
+
+  // Silent live refresh of notification summary every 20 seconds and on tab focus
+  useEffect(() => {
+    if (!user || user.must_change_password) return;
+
+    const intervalId = window.setInterval(() => {
+      loadUnreadCount();
+    }, 20000);
+
+    const handleFocus = () => {
+      loadUnreadCount();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        loadUnreadCount();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user?.id, user?.must_change_password]);
+
   // Enforce RBAC and Warehouse First Lock whenever route, user, or hasWarehouse changes
-  const navigateTo = (targetPath: string) => {
+  const navigateTo = (targetPath: string, trackOrderId?: number | null) => {
     setMobileMenuOpen(false);
     if (!user) {
-      setRoute('/login');
+      syncRouteWithHistory(targetPath === '/login' ? '/login' : '/');
       return;
     }
     if (user.must_change_password) {
-      setRoute('/change-password');
+      syncRouteWithHistory('/change-password');
       return;
     }
     if (!hasWarehouse) {
       if (user.role === 'admin') {
-        setRoute('/admin/warehouses');
+        syncRouteWithHistory('/admin/warehouses');
       } else {
-        setRoute('/warehouse-locked');
+        syncRouteWithHistory('/warehouse-locked');
       }
       return;
     }
+    if (trackOrderId) {
+      setTrackingOrderId(trackOrderId);
+    }
     // Role-based access control: prevent opening another role's pages
     if (!targetPath.startsWith(`/${user.role}`)) {
-      setRoute(defaultRouteForRole(user.role, hasWarehouse));
+      const fallback = defaultRouteForRole(user.role, hasWarehouse);
+      syncRouteWithHistory(fallback);
+      markRouteNotificationsRead(user.role, fallback);
       return;
     }
-    setRoute(targetPath);
+    syncRouteWithHistory(targetPath);
+    markRouteNotificationsRead(user.role, targetPath);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -217,9 +335,9 @@ export default function App() {
       setHasWarehouse(wh);
       setPassword('');
       if (u.must_change_password) {
-        setRoute('/change-password');
+        syncRouteWithHistory('/change-password', true);
       } else {
-        setRoute(defaultRouteForRole(u.role, wh));
+        syncRouteWithHistory(defaultRouteForRole(u.role, wh), true);
         loadUnreadCount();
       }
     } catch (err: any) {
@@ -256,15 +374,19 @@ export default function App() {
     }
     localStorage.removeItem('aice_token');
     setUser(null);
-    setRoute('/login');
+    setNotificationSummary(null);
+    setUnreadCount(0);
+    syncRouteWithHistory('/login');
   };
 
   const openTrackOrder = (orderId: number) => {
     setTrackingOrderId(orderId);
     if (user?.role === 'admin') {
-      setRoute('/admin/track-order');
-    } else {
-      setRoute('/franchisee/track-order');
+      syncRouteWithHistory('/admin/track-order');
+      markRouteNotificationsRead('admin', '/admin/track-order');
+    } else if (user?.role === 'franchisee') {
+      syncRouteWithHistory('/franchisee/track-order');
+      markRouteNotificationsRead('franchisee', '/franchisee/track-order');
     }
   };
 
@@ -276,16 +398,37 @@ export default function App() {
     );
   }
 
-  // ===== 1. LOGIN SCREEN (With "Test accounts" box from seed_test.sql) =====
+  // ===== 1. PUBLIC LANDING PAGE AT "/" OR LOGIN SCREEN AT "/login" =====
   if (!user) {
+    if (route !== '/login') {
+      return (
+        <PublicLandingPage
+          onLoginClick={() => {
+            setLoginError('');
+            syncRouteWithHistory('/login');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+        />
+      );
+    }
+
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
         <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-6 space-y-6">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
-              AICE Franchisee Hub
-            </h1>
-            <p className="text-sm text-slate-600 mt-1">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+                AICE Franchisee Hub
+              </h1>
+              <button
+                type="button"
+                onClick={() => syncRouteWithHistory('/')}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-900 whitespace-nowrap"
+              >
+                ← Back to Home
+              </button>
+            </div>
+            <p className="text-sm text-slate-600">
               Online stock-replenishment ordering, warehouse inventory, and live delivery tracking. Sign in with your assigned account.
             </p>
           </div>
@@ -614,12 +757,20 @@ export default function App() {
         );
       case '/admin/commissions':
         return <CommissionsManagementView />;
+      case '/admin/chatbot-faqs':
+        return <ChatbotFaqsView />;
       case '/admin/reports':
         return <ReportsAndLogsView />;
       case '/admin/store-map':
         return <StoreMapView user={user} />;
       case '/admin/notifications':
-        return <NotificationsView onUnreadChange={loadUnreadCount} />;
+        return (
+          <NotificationsView
+            role={user.role}
+            onUnreadChange={loadUnreadCount}
+            onNavigate={navigateTo}
+          />
+        );
 
       // Agent routes
       case '/agent/dashboard':
@@ -633,7 +784,13 @@ export default function App() {
       case '/agent/store-map':
         return <StoreMapView user={user} />;
       case '/agent/notifications':
-        return <NotificationsView onUnreadChange={loadUnreadCount} />;
+        return (
+          <NotificationsView
+            role={user.role}
+            onUnreadChange={loadUnreadCount}
+            onNavigate={navigateTo}
+          />
+        );
 
       // Franchisee routes
       case '/franchisee/dashboard':
@@ -660,7 +817,13 @@ export default function App() {
       case '/franchisee/store-map':
         return <StoreMapView user={user} />;
       case '/franchisee/notifications':
-        return <NotificationsView onUnreadChange={loadUnreadCount} />;
+        return (
+          <NotificationsView
+            role={user.role}
+            onUnreadChange={loadUnreadCount}
+            onNavigate={navigateTo}
+          />
+        );
       case '/franchisee/profile':
         return (
           <FranchiseeProfileView
@@ -677,7 +840,13 @@ export default function App() {
       case '/delivery/store-map':
         return <StoreMapView user={user} />;
       case '/delivery/notifications':
-        return <NotificationsView onUnreadChange={loadUnreadCount} />;
+        return (
+          <NotificationsView
+            role={user.role}
+            onUnreadChange={loadUnreadCount}
+            onNavigate={navigateTo}
+          />
+        );
 
       default:
         return <StoreMapView user={user} />;
@@ -718,13 +887,20 @@ export default function App() {
             {navItems.map((item) => {
               const isLocked = !hasWarehouse && item.path !== '/admin/warehouses';
               const isActive = activeRoute === item.path;
+              const rawBadgeCount = getSidebarBadgeCount(
+                user.role,
+                item.path,
+                notificationSummary
+              );
+              const badgeLabel = formatBadgeCount(rawBadgeCount);
+
               return (
                 <button
                   key={item.path}
                   type="button"
                   disabled={isLocked}
                   onClick={() => navigateTo(item.path)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-between whitespace-nowrap ${
+                  className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-between gap-2 whitespace-nowrap ${
                     isActive
                       ? 'bg-rose-600 text-white font-semibold'
                       : isLocked
@@ -732,10 +908,17 @@ export default function App() {
                       : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                   }`}
                 >
-                  <span>{item.label}</span>
-                  {item.label === 'Notifications' && unreadCount > 0 && (
-                    <span className="font-mono text-[11px] font-bold text-amber-300">
-                      ({unreadCount})
+                  <span className="truncate">{item.label}</span>
+                  {badgeLabel && (
+                    <span
+                      data-testid={`sidebar-badge-${item.path}`}
+                      className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[11px] font-bold leading-none shrink-0 ${
+                        isActive
+                          ? 'bg-white text-rose-600'
+                          : 'bg-rose-600 text-white'
+                      }`}
+                    >
+                      {badgeLabel}
                     </span>
                   )}
                 </button>
@@ -779,14 +962,13 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
+            <NotificationBellDropdown
+              role={user.role}
+              unreadTotal={unreadCount}
               disabled={!hasWarehouse}
-              onClick={() => navigateTo(`/${user.role}/notifications`)}
-              className="px-3.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40 whitespace-nowrap shrink-0"
-            >
-              Notifications {unreadCount > 0 ? `(${unreadCount})` : ''}
-            </button>
+              onSummaryRefresh={loadUnreadCount}
+              onNavigate={navigateTo}
+            />
           </div>
         </header>
 

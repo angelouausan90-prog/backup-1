@@ -315,6 +315,40 @@ export function initDatabase() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (promo_id) REFERENCES promos(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS system_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS faqs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      question TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      keywords TEXT DEFAULT '',
+      audience TEXT NOT NULL DEFAULT 'all',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_ai_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      tokens_in INTEGER,
+      tokens_out INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_unanswered (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Open',
+      resolved_faq_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   // Safe migrations on existing orders & order_items tables without resetting data
@@ -359,6 +393,70 @@ export function initDatabase() {
   }
   if (!promoCols.includes('recurring_monthly')) {
     db.exec('ALTER TABLE promos ADD COLUMN recurring_monthly INTEGER NOT NULL DEFAULT 0');
+  }
+
+  const faqCols = (
+    db.prepare('PRAGMA table_info(faqs)').all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!faqCols.includes('keywords')) {
+    db.exec("ALTER TABLE faqs ADD COLUMN keywords TEXT DEFAULT ''");
+  }
+
+  // Seed default system_settings if not already present (editable by Admin)
+  const insertSetting = db.prepare(
+    'INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)'
+  );
+  insertSetting.run(
+    'show_public_prices',
+    process.env.PUBLIC_SHOW_PRICES === '1' ? '1' : '0'
+  );
+  insertSetting.run(
+    'contact_email',
+    process.env.PUBLIC_CONTACT_EMAIL || 'franchising@aicehub.local'
+  );
+  insertSetting.run(
+    'contact_phone',
+    process.env.PUBLIC_CONTACT_PHONE || '+63 (02) 8888-2423'
+  );
+
+  // Seed initial public FAQs (visible to "all") if the faqs table is empty
+  const faqCountRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM faqs')
+    .get() as { cnt: number };
+  if (faqCountRow.cnt === 0) {
+    const insertFaq = db.prepare(
+      'INSERT INTO faqs (question, answer, audience, sort_order, is_active) VALUES (?, ?, ?, ?, 1)'
+    );
+    insertFaq.run(
+      'How do approved franchisees place stock-replenishment orders?',
+      'Approved franchisees sign in to their store workspace, select an active origin warehouse, add AICE cartons to their replenishment cart, choose a preferred delivery schedule, and submit online. Eligible volume or bundle discounts apply automatically at checkout.',
+      'all',
+      1
+    );
+    insertFaq.run(
+      'How can I apply to become an AICE franchisee?',
+      'There is no public self sign-up or online application form. All new franchisee applications are evaluated and registered on-site by accredited AICE field agents, who pin the verified store coordinates and submit the application for Admin approval.',
+      'all',
+      2
+    );
+    insertFaq.run(
+      'When is warehouse inventory deducted for an order?',
+      'Placing an order online reserves the requested cartons with a Placed status. Warehouse stock is formally deducted once an Admin reviews and confirms the replenishment order.',
+      'all',
+      3
+    );
+    insertFaq.run(
+      'How does live delivery tracking work?',
+      'Once an order is confirmed and assigned to a delivery rider, franchisees can open the live tracking map to see the origin warehouse, destination store pin, current rider GPS coordinates, 7-stage progress timeline, and estimated arrival time.',
+      'all',
+      4
+    );
+    insertFaq.run(
+      'How are payments handled for replenishment orders?',
+      'The platform coordinates stock reservations, automated promotional discounts, warehouse dispatch, and live delivery proof. Settlement is handled offline according to your franchise agreement without an online payment gateway.',
+      'all',
+      5
+    );
   }
 
   // Seed roles (mirrors database/seed.sql)
@@ -412,3 +510,4 @@ export function initDatabase() {
 }
 
 export default db;
+

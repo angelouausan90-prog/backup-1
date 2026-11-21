@@ -6,6 +6,10 @@
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
+  .font-display {
+    font-family: 'Outfit', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
   .font-mono,
   .tabular-nums {
     font-family: 'IBM Plex Mono', monospace;

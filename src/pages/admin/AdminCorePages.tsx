@@ -14,13 +14,51 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
 }) => {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState('');
+  const [publicSettings, setPublicSettings] = useState({
+    contact_email: '',
+    contact_phone: '',
+    show_public_prices: false,
+  });
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState('');
 
   useEffect(() => {
     api
       .get('/admin/dashboard')
       .then((res) => setData(res))
       .catch((err) => setError(err.message || 'Failed to load dashboard.'));
+    api
+      .get('/admin/settings')
+      .then((res) => {
+        if (res) {
+          setPublicSettings({
+            contact_email: res.contact_email || '',
+            contact_phone: res.contact_phone || '',
+            show_public_prices: Boolean(res.show_public_prices),
+          });
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  const handleSavePublicSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSettingsSaving(true);
+    setSettingsMessage('');
+    try {
+      const res = await api.put('/admin/settings', publicSettings);
+      setPublicSettings({
+        contact_email: res.contact_email || publicSettings.contact_email,
+        contact_phone: res.contact_phone || publicSettings.contact_phone,
+        show_public_prices: Boolean(res.show_public_prices),
+      });
+      setSettingsMessage('Public landing page settings updated.');
+    } catch (err: any) {
+      setSettingsMessage(err.message || 'Failed to save settings.');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
 
   if (error) {
     return (
@@ -140,6 +178,98 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
           </div>
         )}
       </div>
+
+      {/* Public Landing Page Settings (Editable by Admin) */}
+      <form
+        onSubmit={handleSavePublicSettings}
+        className="bg-white border border-slate-200 rounded-lg p-5 space-y-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">
+              Public Landing Page Settings
+            </h2>
+            <p className="text-xs text-slate-600">
+              Configure the franchise inquiry contact details and whether product prices are shown on the public catalog at <span className="font-mono">/</span>.
+            </p>
+          </div>
+          {settingsMessage && (
+            <span className="text-xs font-semibold text-emerald-700">
+              {settingsMessage}
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+          <div>
+            <label
+              htmlFor="public-contact-email"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              Franchise Inquiry Email
+            </label>
+            <input
+              id="public-contact-email"
+              type="email"
+              required
+              value={publicSettings.contact_email}
+              onChange={(e) =>
+                setPublicSettings((prev) => ({
+                  ...prev,
+                  contact_email: e.target.value,
+                }))
+              }
+              className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="public-contact-phone"
+              className="block text-xs font-semibold text-slate-700 mb-1"
+            >
+              Franchise Inquiry Phone
+            </label>
+            <input
+              id="public-contact-phone"
+              type="text"
+              required
+              value={publicSettings.contact_phone}
+              onChange={(e) =>
+                setPublicSettings((prev) => ({
+                  ...prev,
+                  contact_phone: e.target.value,
+                }))
+              }
+              className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-sm"
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={publicSettings.show_public_prices}
+                onChange={(e) =>
+                  setPublicSettings((prev) => ({
+                    ...prev,
+                    show_public_prices: e.target.checked,
+                  }))
+                }
+                className="w-4 h-4 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+              />
+              <span>Show prices on public catalog</span>
+            </label>
+            <button
+              type="submit"
+              disabled={settingsSaving}
+              className="px-4 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              {settingsSaving ? 'Saving...' : 'Save Settings'}
+            </button>
+          </div>
+        </div>
+      </form>
     </div>
   );
 };
