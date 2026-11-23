@@ -7,6 +7,7 @@ import {
   PublicStoreItem,
 } from '../../utils/domainRules';
 import { PublicChatbotWidget } from '../../components/PublicChatbotWidget';
+import { LandingFranchiseeQrSection } from '../../components/FranchiseeQrSection';
 
 interface PublicFaqItem {
   id: number;
@@ -18,10 +19,14 @@ interface PublicSettingsData {
   show_public_prices: boolean;
   contact_email: string;
   contact_phone: string;
+  app_base_url?: string;
+  franchisee_order_qr_url?: string;
 }
 
 interface PublicLandingPageProps {
   onLoginClick: () => void;
+  onOrderNowClick?: () => void;
+  isAdmin?: boolean;
 }
 
 // Create a custom purple SVG marker icon for the public store locator map
@@ -38,6 +43,8 @@ const createPublicStoreIcon = () =>
 
 export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({
   onLoginClick,
+  onOrderNowClick,
+  isAdmin = false,
 }) => {
   const [products, setProducts] = useState<PublicProductItem[]>([]);
   const [showPrices, setShowPrices] = useState(false);
@@ -48,6 +55,7 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({
     show_public_prices: false,
     contact_email: 'franchising@aicehub.local',
     contact_phone: '+63 (02) 8888-2423',
+    app_base_url: '',
   });
   const [loadingData, setLoadingData] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -89,6 +97,8 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({
             show_public_prices: Boolean(settingsRes.show_public_prices),
             contact_email: settingsRes.contact_email || 'franchising@aicehub.local',
             contact_phone: settingsRes.contact_phone || '+63 (02) 8888-2423',
+            app_base_url: settingsRes.app_base_url || '',
+            franchisee_order_qr_url: settingsRes.franchisee_order_qr_url || '',
           });
         }
       })
@@ -399,6 +409,13 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({
           </div>
         </div>
       </section>
+
+      {/* 2B. FRANCHISEE QR CODE INSTANT ORDERING SECTION ("Franchisee? Order stock in seconds") */}
+      <LandingFranchiseeQrSection
+        appBaseUrl={settings.app_base_url}
+        onOrderNowClick={onOrderNowClick || onLoginClick}
+        isAdmin={isAdmin}
+      />
 
       {/* 3. HOW IT WORKS (3 Steps) */}
       <section

@@ -1,4 +1,4 @@
-export type RoleName = 'admin' | 'agent' | 'franchisee' | 'delivery';
+export type RoleName = 'admin' | 'agent' | 'franchisee' | 'delivery' | 'customer';
 
 export interface User {
   id: number;
@@ -15,6 +15,13 @@ export interface User {
     address: string;
     lat: number;
     lng: number;
+    store_code?: string | null;
+    is_open?: boolean;
+    application_id?: number | null;
+    application_no?: string | null;
+    application_status?: string;
+    freezer_no?: string;
+    can_order_replenishment?: boolean;
   } | null;
 }
 

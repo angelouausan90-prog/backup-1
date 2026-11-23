@@ -349,7 +349,170 @@ export function initDatabase() {
       resolved_faq_id INTEGER,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS franchisee_applications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_no TEXT NOT NULL UNIQUE,
+      franchisee_id INTEGER NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL UNIQUE,
+      agent_id INTEGER NOT NULL,
+      date_applied TEXT NOT NULL DEFAULT (date('now')),
+      first_name TEXT NOT NULL,
+      middle_name TEXT DEFAULT '',
+      last_name TEXT NOT NULL,
+      complete_name TEXT NOT NULL,
+      contact_number TEXT NOT NULL,
+      store_name TEXT NOT NULL,
+      street TEXT NOT NULL,
+      barangay TEXT NOT NULL,
+      city_municipality TEXT NOT NULL,
+      province TEXT NOT NULL,
+      full_address TEXT NOT NULL,
+      landmark TEXT DEFAULT '',
+      facebook_account TEXT DEFAULT '',
+      email TEXT NOT NULL,
+      remarks TEXT DEFAULT '',
+      lat REAL NOT NULL,
+      lng REAL NOT NULL,
+      store_photo_url TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending Admin Review',
+      rejection_reason TEXT,
+      approved_by INTEGER,
+      approved_at TEXT,
+      assigned_delivery_user_id INTEGER,
+      assigned_at TEXT,
+      date_delivered TEXT,
+      delivered_at TEXT,
+      activated_at TEXT,
+      cashier_name TEXT DEFAULT '',
+      collector_name TEXT DEFAULT '',
+      delivery_team_name TEXT DEFAULT '',
+      driver_name TEXT DEFAULT '',
+      customer_printed_name TEXT DEFAULT '',
+      noted_by_name TEXT DEFAULT '',
+      freezer_no TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (franchisee_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (agent_id) REFERENCES agents(id),
+      FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (assigned_delivery_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS franchisee_equipment (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      item TEXT NOT NULL,
+      condition TEXT NOT NULL DEFAULT 'NOT_ISSUED',
+      quantity INTEGER NOT NULL DEFAULT 0,
+      freezer_no TEXT DEFAULT '',
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(application_id, item),
+      FOREIGN KEY (application_id) REFERENCES franchisee_applications(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS franchisee_signatures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      printed_name TEXT NOT NULL,
+      signature_image TEXT NOT NULL,
+      signed_by_user_id INTEGER,
+      signed_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(application_id, role),
+      FOREIGN KEY (application_id) REFERENCES franchisee_applications(id) ON DELETE CASCADE,
+      FOREIGN KEY (signed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS store_qr_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      store_id INTEGER NOT NULL UNIQUE,
+      store_code TEXT NOT NULL UNIQUE,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS store_inventory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      store_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(store_id, product_id),
+      FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_no TEXT NOT NULL UNIQUE,
+      store_id INTEGER NOT NULL,
+      customer_user_id INTEGER,
+      customer_name TEXT NOT NULL,
+      contact_no TEXT NOT NULL,
+      address TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      notes TEXT,
+      payment_method TEXT NOT NULL DEFAULT 'Cash on Delivery',
+      status TEXT NOT NULL DEFAULT 'Placed',
+      rejection_reason TEXT,
+      delivery_staff_id INTEGER,
+      stock_deducted INTEGER NOT NULL DEFAULT 0,
+      total REAL NOT NULL DEFAULT 0.00,
+      accepted_at TEXT,
+      preparing_at TEXT,
+      out_for_delivery_at TEXT,
+      delivered_at TEXT,
+      cancelled_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+      FOREIGN KEY (customer_user_id) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (delivery_staff_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL,
+      unit_price REAL NOT NULL,
+      FOREIGN KEY (order_id) REFERENCES customer_orders(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_order_locations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      lat REAL NOT NULL,
+      lng REAL NOT NULL,
+      recorded_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (order_id) REFERENCES customer_orders(id) ON DELETE CASCADE
+    );
   `);
+
+  // Safe migrations on franchisees & franchisee_applications for store_code and is_open
+  const franchiseeCols = (
+    db.prepare('PRAGMA table_info(franchisees)').all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!franchiseeCols.includes('store_code')) {
+    db.exec('ALTER TABLE franchisees ADD COLUMN store_code TEXT');
+  }
+  if (!franchiseeCols.includes('is_open')) {
+    db.exec('ALTER TABLE franchisees ADD COLUMN is_open INTEGER NOT NULL DEFAULT 1');
+  }
+
+  const appCols = (
+    db.prepare('PRAGMA table_info(franchisee_applications)').all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!appCols.includes('store_code')) {
+    db.exec('ALTER TABLE franchisee_applications ADD COLUMN store_code TEXT');
+  }
+  if (!appCols.includes('is_open')) {
+    db.exec('ALTER TABLE franchisee_applications ADD COLUMN is_open INTEGER NOT NULL DEFAULT 1');
+  }
 
   // Safe migrations on existing orders & order_items tables without resetting data
   const orderCols = (db.prepare('PRAGMA table_info(orders)').all() as { name: string }[]).map(
@@ -465,6 +628,7 @@ export function initDatabase() {
   insertRole.run(2, 'agent');
   insertRole.run(3, 'franchisee');
   insertRole.run(4, 'delivery');
+  insertRole.run(5, 'customer');
 
   const adminHash = bcrypt.hashSync('Admin@1234', 10);
   const testHash = bcrypt.hashSync('Test@1234', 10);
@@ -477,17 +641,23 @@ export function initDatabase() {
   insertUser.run(1, 'admin', adminHash, 'System Administrator', 'admin@aicehub.local', '09170000001', 0);
 
   // Seed test accounts from seed_test.sql (with is_test = 1, must_change_password = 0)
-  // NOTE: Do NOT seed any warehouse, products, or orders so first-run Warehouse Setup lock works out of the box!
   insertUser.run(1, 'admin_test', testHash, 'Test Admin', 'admin_test@aicehub.local', '09171111111', 1);
   insertUser.run(2, 'agent_test', testHash, 'Maria Santos (Test Agent)', 'agent_test@aicehub.local', '09172222222', 1);
   insertUser.run(3, 'franchisee_test', testHash, 'Juan Dela Cruz', 'franchisee_test@aicehub.local', '09173333333', 1);
   insertUser.run(3, 'franchisee_pending_test', testHash, 'Pedro Reyes', 'pending_test@aicehub.local', '09174444444', 1);
   insertUser.run(4, 'delivery_test', testHash, 'Carlo Mendoza (Test Rider)', 'delivery_test@aicehub.local', '09175555555', 1);
+  insertUser.run(3, 'franchisee_delivery_test', testHash, 'Siti Aminah Sinsuat', 'siti_delivery@aicehub.local', '09176666666', 1);
+  insertUser.run(3, 'franchisee_approved_test', testHash, 'Ramonito Mangelen', 'ramonito_approved@aicehub.local', '09177777777', 1);
+  insertUser.run(5, 'customer_test', testHash, 'Angela Villanueva (Customer)', 'customer_test@aicehub.local', '09178888888', 1);
 
   const adminTestUser = db.prepare("SELECT id FROM users WHERE username = 'admin_test'").get() as { id: number } | undefined;
   const agentTestUser = db.prepare("SELECT id FROM users WHERE username = 'agent_test'").get() as { id: number } | undefined;
+  const deliveryTestUser = db.prepare("SELECT id FROM users WHERE username = 'delivery_test'").get() as { id: number } | undefined;
+  const customerTestUser = db.prepare("SELECT id FROM users WHERE username = 'customer_test'").get() as { id: number } | undefined;
   const frApprovedUser = db.prepare("SELECT id FROM users WHERE username = 'franchisee_test'").get() as { id: number } | undefined;
   const frPendingUser = db.prepare("SELECT id FROM users WHERE username = 'franchisee_pending_test'").get() as { id: number } | undefined;
+  const frForDeliveryUser = db.prepare("SELECT id FROM users WHERE username = 'franchisee_delivery_test'").get() as { id: number } | undefined;
+  const frJustApprovedUser = db.prepare("SELECT id FROM users WHERE username = 'franchisee_approved_test'").get() as { id: number } | undefined;
 
   if (agentTestUser && adminTestUser) {
     db.prepare('INSERT OR IGNORE INTO agents (user_id, created_by) VALUES (?, ?)').run(agentTestUser.id, adminTestUser.id);
@@ -496,18 +666,398 @@ export function initDatabase() {
     if (agentRow && frApprovedUser) {
       db.prepare(`
         INSERT OR IGNORE INTO franchisees (user_id, agent_id, owner_name, store_name, address, contact_number, lat, lng, status, approved_by, approved_at)
-        VALUES (?, ?, 'Juan Dela Cruz', 'AICE Sampaloc Corner Store', '124 Espana Blvd, Sampaloc, Manila', '09173333333', 14.6042000, 120.9921000, 'Approved', ?, datetime('now'))
+        VALUES (?, ?, 'Juan Dela Cruz', 'AICE Sampaloc Corner Store', '124 Espana Blvd, Brgy. 455, Sampaloc, Manila', '09173333333', 14.6042000, 120.9921000, 'Approved', ?, datetime('now'))
       `).run(frApprovedUser.id, agentRow.id, adminTestUser.id);
     }
 
     if (agentRow && frPendingUser) {
       db.prepare(`
         INSERT OR IGNORE INTO franchisees (user_id, agent_id, owner_name, store_name, address, contact_number, lat, lng, status)
-        VALUES (?, ?, 'Pedro Reyes', 'AICE Cubao Ice Cream Mart', '88 Aurora Blvd, Cubao, Quezon City', '09174444444', 14.6191000, 121.0537000, 'Pending')
+        VALUES (?, ?, 'Pedro Reyes', 'AICE Cubao Ice Cream Mart', '88 Aurora Blvd, Brgy. Socorro, Cubao, Quezon City', '09174444444', 14.6191000, 121.0537000, 'Pending')
       `).run(frPendingUser.id, agentRow.id);
     }
+
+    if (agentRow && frForDeliveryUser) {
+      db.prepare(`
+        INSERT OR IGNORE INTO franchisees (user_id, agent_id, owner_name, store_name, address, contact_number, lat, lng, status, approved_by, approved_at)
+        VALUES (?, ?, 'Siti Aminah Sinsuat', 'AICE Cotabato Rosary Heights Mart', '45 Sinsuat Ave, Brgy. Rosary Heights II, Cotabato City, Maguindanao del Norte', '09176666666', 7.2167000, 124.2500000, 'Approved', ?, datetime('now'))
+      `).run(frForDeliveryUser.id, agentRow.id, adminTestUser.id);
+    }
+
+    if (agentRow && frJustApprovedUser) {
+      db.prepare(`
+        INSERT OR IGNORE INTO franchisees (user_id, agent_id, owner_name, store_name, address, contact_number, lat, lng, status, approved_by, approved_at)
+        VALUES (?, ?, 'Ramonito Mangelen', 'AICE Sinsuat Avenue Corner', '102 Quezon Ave, Brgy. Poblacion V, Cotabato City, Maguindanao del Norte', '09177777777', 7.2236000, 124.2464000, 'Approved', ?, datetime('now'))
+      `).run(frJustApprovedUser.id, agentRow.id, adminTestUser.id);
+    }
+  }
+
+  // Ensure every row in franchisees has a corresponding franchisee_applications record and 6 equipment rows
+  const standardItems = [
+    'Freezer',
+    'Lock & Key',
+    'Scraper',
+    'Baskets',
+    'Manual',
+    'Freezer Cover',
+  ];
+  const sampleSigSvgDataUrl = (label: string) =>
+    `data:image/svg+xml;utf8,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="280" height="80" viewBox="0 0 280 80"><path d="M20 55 Q 55 18 90 50 T 165 45 T 250 38" fill="none" stroke="#1e293b" stroke-width="2.5" stroke-linecap="round"/><text x="24" y="72" font-family="monospace" font-size="11" fill="#475569">${label}</text></svg>`
+    )}`;
+
+  const allFranchisees = db
+    .prepare(
+      `SELECT f.*, u.username, u.email
+       FROM franchisees f
+       JOIN users u ON u.id = f.user_id
+       ORDER BY f.id ASC`
+    )
+    .all() as any[];
+
+  for (const fr of allFranchisees) {
+    const existingApp = db
+      .prepare('SELECT id, status FROM franchisee_applications WHERE franchisee_id = ?')
+      .get(fr.id) as { id: number; status: string } | undefined;
+
+    if (!existingApp) {
+      const appNo = `FR-2026-${String(fr.id).padStart(4, '0')}`;
+      const nameParts = String(fr.owner_name || '').trim().split(/\s+/);
+      const firstName = nameParts[0] || 'Applicant';
+      const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : 'Owner';
+      const middleName =
+        nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '';
+
+      let appStatus = 'Pending Admin Review';
+      let assignedDeliveryId: number | null = null;
+      let dateDelivered: string | null = null;
+      let deliveredAt: string | null = null;
+      let activatedAt: string | null = null;
+      let cashierName = '';
+      let collectorName = '';
+      let deliveryTeamName = '';
+      let driverName = '';
+      let customerPrinted = fr.owner_name;
+      let notedByName = '';
+      let freezerNo = '';
+      let landmark = 'Near main intersection / commercial strip';
+      let fbAccount = `fb.com/${fr.username}`;
+      let street = '124 Espana Blvd';
+      let barangay = 'Sampaloc';
+      let city = 'Manila';
+      let province = 'Metro Manila';
+
+      if (fr.username === 'franchisee_test') {
+        appStatus = 'Active';
+        assignedDeliveryId = deliveryTestUser?.id || null;
+        dateDelivered = '2026-11-18';
+        deliveredAt = '2026-11-18 14:30:00';
+        activatedAt = '2026-11-18 15:00:00';
+        cashierName = 'Lorna Mae Dizon';
+        collectorName = 'Arnel P. Gutierrez';
+        deliveryTeamName = 'JCDL Cold-Chain Team Alpha';
+        driverName = 'Carlo Mendoza (Test Rider)';
+        notedByName = 'Test Admin';
+        freezerNo = 'FZ-COT-2026-0088';
+        landmark = 'Across UST Gate 2, beside pharmacy';
+      } else if (fr.username === 'franchisee_pending_test') {
+        appStatus = 'Pending Admin Review';
+        street = '88 Aurora Blvd';
+        barangay = 'Socorro';
+        city = 'Quezon City';
+        province = 'Metro Manila';
+        landmark = 'Near Araneta Center LRT-2 Cubao Station';
+      } else if (fr.username === 'franchisee_delivery_test') {
+        appStatus = 'For Delivery';
+        assignedDeliveryId = deliveryTestUser?.id || null;
+        cashierName = 'Lorna Mae Dizon';
+        collectorName = 'Arnel P. Gutierrez';
+        notedByName = 'Test Admin';
+        street = '45 Sinsuat Ave';
+        barangay = 'Rosary Heights II';
+        city = 'Cotabato City';
+        province = 'Maguindanao del Norte';
+        landmark = 'Beside Cotabato City Plaza & Southseas Mall';
+      } else if (fr.username === 'franchisee_approved_test') {
+        appStatus = 'Approved';
+        cashierName = 'Lorna Mae Dizon';
+        street = '102 Quezon Ave';
+        barangay = 'Poblacion V';
+        city = 'Cotabato City';
+        province = 'Maguindanao del Norte';
+        landmark = 'In front of Public Market Entrance';
+      } else if (fr.status === 'Approved') {
+        appStatus = 'Active';
+      } else if (fr.status === 'Rejected') {
+        appStatus = 'Rejected';
+      }
+
+      const appRes = db
+        .prepare(
+          `INSERT INTO franchisee_applications (
+            application_no, franchisee_id, user_id, agent_id, date_applied,
+            first_name, middle_name, last_name, complete_name, contact_number,
+            store_name, street, barangay, city_municipality, province, full_address,
+            landmark, facebook_account, email, remarks, lat, lng,
+            status, rejection_reason, approved_by, approved_at,
+            assigned_delivery_user_id, assigned_at, date_delivered, delivered_at, activated_at,
+            cashier_name, collector_name, delivery_team_name, driver_name,
+            customer_printed_name, noted_by_name, freezer_no
+          ) VALUES (
+            ?, ?, ?, ?, date('now'),
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?
+          )`
+        )
+        .run(
+          appNo,
+          fr.id,
+          fr.user_id,
+          fr.agent_id,
+          firstName,
+          middleName,
+          lastName,
+          fr.owner_name,
+          fr.contact_number,
+          fr.store_name,
+          street,
+          barangay,
+          city,
+          province,
+          fr.address,
+          landmark,
+          fbAccount,
+          fr.email || `${fr.username}@aicehub.local`,
+          'Verified electrical outlet and covered store front for AICE chest freezer.',
+          fr.lat,
+          fr.lng,
+          appStatus,
+          fr.rejection_reason || null,
+          fr.approved_by || null,
+          fr.approved_at || null,
+          assignedDeliveryId,
+          assignedDeliveryId ? '2026-11-18 09:00:00' : null,
+          dateDelivered,
+          deliveredAt,
+          activatedAt,
+          cashierName,
+          collectorName,
+          deliveryTeamName,
+          driverName,
+          customerPrinted,
+          notedByName,
+          freezerNo
+        );
+
+      const appId = Number(appRes.lastInsertRowid);
+      const insertEq = db.prepare(
+        `INSERT OR IGNORE INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+
+      for (const itemName of standardItems) {
+        if (appStatus === 'Active') {
+          insertEq.run(
+            appId,
+            itemName,
+            'NEW',
+            itemName === 'Baskets' ? 4 : 1,
+            itemName === 'Freezer' ? freezerNo : ''
+          );
+        } else {
+          insertEq.run(appId, itemName, 'NOT_ISSUED', 0, '');
+        }
+      }
+
+      const insertSig = db.prepare(
+        `INSERT OR IGNORE INTO franchisee_signatures (application_id, role, printed_name, signature_image, signed_by_user_id)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+      insertSig.run(
+        appId,
+        'sales_agent',
+        'Maria Santos (Test Agent)',
+        sampleSigSvgDataUrl('Maria Santos'),
+        agentTestUser?.id || null
+      );
+
+      if (appStatus === 'Active') {
+        insertSig.run(
+          appId,
+          'customer',
+          fr.owner_name,
+          sampleSigSvgDataUrl(fr.owner_name),
+          fr.user_id
+        );
+        insertSig.run(
+          appId,
+          'delivery_team',
+          deliveryTeamName,
+          sampleSigSvgDataUrl('JCDL Delivery Team'),
+          deliveryTestUser?.id || null
+        );
+        insertSig.run(
+          appId,
+          'driver',
+          driverName,
+          sampleSigSvgDataUrl('Carlo Mendoza'),
+          deliveryTestUser?.id || null
+        );
+        insertSig.run(
+          appId,
+          'collector',
+          collectorName,
+          sampleSigSvgDataUrl(collectorName),
+          adminTestUser?.id || null
+        );
+        insertSig.run(
+          appId,
+          'noted_by',
+          notedByName,
+          sampleSigSvgDataUrl('Test Admin'),
+          adminTestUser?.id || null
+        );
+      } else if (appStatus === 'For Delivery') {
+        insertSig.run(
+          appId,
+          'noted_by',
+          notedByName,
+          sampleSigSvgDataUrl('Test Admin'),
+          adminTestUser?.id || null
+        );
+      }
+    }
+  }
+
+  // Ensure every store in franchisees has a unique, non-guessable store_code in store_qr_codes, franchisees, and franchisee_applications
+  const deterministicCodesByUsername: Record<string, string> = {
+    franchisee_test: 'sampaloc-a8f3k9m2',
+    franchisee_pending_test: 'cubao-p4x7n2q8',
+    franchisee_delivery_test: 'rosary-d3v9k1w4',
+    franchisee_approved_test: 'sinsuat-m5r2t8z6',
+  };
+
+  const storesForCodes = db
+    .prepare(
+      `SELECT f.id, f.store_name, f.store_code, u.username, fa.status AS app_status
+       FROM franchisees f
+       JOIN users u ON u.id = f.user_id
+       LEFT JOIN franchisee_applications fa ON fa.franchisee_id = f.id`
+    )
+    .all() as any[];
+
+  for (const st of storesForCodes) {
+    const existingQr = db
+      .prepare('SELECT store_code FROM store_qr_codes WHERE store_id = ?')
+      .get(st.id) as { store_code: string } | undefined;
+
+    let code = existingQr?.store_code || st.store_code || deterministicCodesByUsername[st.username];
+    if (!code) {
+      const slug = String(st.store_name || 'store')
+        .toLowerCase()
+        .replace(/^aice\s+/i, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 10);
+      const token = Math.random().toString(36).slice(2, 10);
+      code = `${slug || 'st'}-${token}`;
+    }
+
+    db.prepare(
+      'INSERT OR IGNORE INTO store_qr_codes (store_id, store_code) VALUES (?, ?)'
+    ).run(st.id, code);
+    db.prepare('UPDATE franchisees SET store_code = ? WHERE id = ? AND (store_code IS NULL OR store_code = \'\')').run(
+      code,
+      st.id
+    );
+    db.prepare(
+      'UPDATE franchisee_applications SET store_code = ? WHERE franchisee_id = ? AND (store_code IS NULL OR store_code = \'\')'
+    ).run(code, st.id);
+  }
+
+  // Seed initial store_inventory for Active stores if they have no store_inventory rows yet
+  const activeProducts = db
+    .prepare('SELECT id, price FROM products WHERE is_active = 1 ORDER BY id ASC')
+    .all() as { id: number; price: number }[];
+
+  const activeStores = db
+    .prepare(
+      `SELECT f.id, f.lat, f.lng, u.username
+       FROM franchisees f
+       JOIN users u ON u.id = f.user_id
+       JOIN franchisee_applications fa ON fa.franchisee_id = f.id
+       WHERE fa.status = 'Active'`
+    )
+    .all() as { id: number; lat: number; lng: number; username: string }[];
+
+  if (activeProducts.length > 0 && activeStores.length > 0) {
+    const insertStoreInv = db.prepare(
+      'INSERT OR IGNORE INTO store_inventory (store_id, product_id, quantity) VALUES (?, ?, ?)'
+    );
+    for (const store of activeStores) {
+      const countRow = db
+        .prepare('SELECT COUNT(*) AS cnt FROM store_inventory WHERE store_id = ?')
+        .get(store.id) as { cnt: number };
+      if (countRow.cnt === 0) {
+        for (const prod of activeProducts) {
+          insertStoreInv.run(store.id, prod.id, 30);
+        }
+      }
+    }
+  }
+
+  // Seed sample customer QR orders on the Active test store if customer_orders is empty
+  const qrOrdersCount = (
+    db.prepare('SELECT COUNT(*) AS cnt FROM customer_orders').get() as { cnt: number }
+  ).cnt;
+  const sampalocStore = activeStores.find((s) => s.username === 'franchisee_test') || activeStores[0];
+
+  if (qrOrdersCount === 0 && sampalocStore && activeProducts.length >= 2) {
+    const p1 = activeProducts[0];
+    const p2 = activeProducts[1];
+    const total1 = Number((2 * p1.price + 1 * p2.price).toFixed(2));
+
+    const res1 = db
+      .prepare(
+        `INSERT INTO customer_orders (
+          order_no, store_id, customer_user_id, customer_name, contact_no,
+          address, latitude, longitude, notes, payment_method, status,
+          delivery_staff_id, stock_deducted, total,
+          accepted_at, preparing_at, out_for_delivery_at, delivered_at, created_at, updated_at
+        ) VALUES (
+          'QRO-2026-0001', ?, ?, 'Angela Villanueva', '09178888888',
+          '1580 Dapitan St, Sampaloc, Manila', 14.6095, 120.9898,
+          'Call upon arrival at the dorm lobby.', 'Cash on Delivery', 'Delivered',
+          ?, 1, ?,
+          datetime('now', '-2 hours'), datetime('now', '-100 minutes'),
+          datetime('now', '-80 minutes'), datetime('now', '-55 minutes'),
+          datetime('now', '-2 hours'), datetime('now', '-55 minutes')
+        )`
+      )
+      .run(
+        sampalocStore.id,
+        customerTestUser?.id || null,
+        deliveryTestUser?.id || null,
+        total1
+      );
+    const order1Id = Number(res1.lastInsertRowid);
+    const insertQrItem = db.prepare(
+      'INSERT INTO customer_order_items (order_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)'
+    );
+    insertQrItem.run(order1Id, p1.id, 2, p1.price);
+    insertQrItem.run(order1Id, p2.id, 1, p2.price);
+    db.prepare(
+      'INSERT INTO customer_order_locations (order_id, lat, lng) VALUES (?, ?, ?)'
+    ).run(order1Id, 14.6095, 120.9898);
   }
 }
 
 export default db;
+
+
 

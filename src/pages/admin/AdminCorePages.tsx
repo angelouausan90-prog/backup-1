@@ -4,6 +4,13 @@ import { MapPicker } from '../../components/MapPicker';
 import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
 import { Warehouse } from '../../types';
 import { resolveKnownLocationCoords } from '../../utils/domainRules';
+import {
+  FranchiseePaperFormModal,
+  ApplicationStatusBadge,
+  ApplicationWorkflowTimeline,
+  downloadApplicationPdf,
+} from '../../components/FranchiseePaperFormModal';
+import { AdminQrPosterCard } from '../../components/FranchiseeQrSection';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -19,6 +26,9 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
     contact_phone: '',
     show_public_prices: false,
   });
+  const [approvedStores, setApprovedStores] = useState<
+    { id: number; store_name: string; application_no?: string | null }[]
+  >([]);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState('');
 
@@ -37,6 +47,21 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
             show_public_prices: Boolean(res.show_public_prices),
           });
         }
+      })
+      .catch(() => {});
+    api
+      .get('/franchisee-applications?limit=100')
+      .then((res) => {
+        const list = Array.isArray(res?.data) ? res.data : [];
+        setApprovedStores(
+          list
+            .filter((r: any) => r.status !== 'Rejected')
+            .map((r: any) => ({
+              id: Number(r.franchisee_id || r.id),
+              store_name: String(r.store_name || ''),
+              application_no: r.application_no || null,
+            }))
+        );
       })
       .catch(() => {});
   }, []);
@@ -270,6 +295,9 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
           </div>
         </div>
       </form>
+
+      {/* Admin-only Franchisee Ordering QR Download & Poster Print Card */}
+      <AdminQrPosterCard stores={approvedStores} />
     </div>
   );
 };
@@ -777,141 +805,288 @@ export const AgentsManagementView: React.FC = () => {
   );
 };
 
-// ===== 4. PENDING FRANCHISEE APPROVALS =====
+// ===== 4. PENDING FRANCHISEE APPROVALS & EQUIPMENT DELIVERY DISPATCH =====
 export const PendingFranchiseesView: React.FC = () => {
   const [rows, setRows] = useState<any[]>([]);
+  const [riders, setRiders] = useState<any[]>([]);
+  const [selectedRiders, setSelectedRiders] = useState<Record<number, string>>({});
   const [reasons, setReasons] = useState<Record<number, string>>({});
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [selectedApplication, setSelectedApplication] = useState<any | null>(null);
 
   const load = () => {
-    api.get('/admin/franchisees?status=Pending&limit=50').then((res) => setRows(res.data));
+    api.get('/franchisee-applications?limit=50').then((res) => {
+      const all: any[] = res.data || [];
+      setRows(
+        all.filter(
+          (r) =>
+            r.status === 'Pending Admin Review' ||
+            r.status === 'Approved' ||
+            r.status === 'For Delivery'
+        )
+      );
+    });
+    api
+      .get('/franchisee-applications/delivery-staff-options')
+      .then((res) => setRiders(res.data || []))
+      .catch(() => {});
   };
 
   useEffect(() => {
     load();
   }, []);
 
-  const handleReview = async (id: number, decision: 'Approved' | 'Rejected') => {
+  const handleReview = async (appRecord: any, decision: 'Approved' | 'Rejected') => {
     setError('');
     setMessage('');
-    if (decision === 'Rejected' && !reasons[id]?.trim()) {
-      setError('Please enter a rejection reason before rejecting a franchisee registration.');
+    const reason = reasons[appRecord.id]?.trim() || '';
+    if (decision === 'Rejected' && !reason) {
+      setError('Please enter a rejection reason before rejecting a franchisee application.');
+      return;
+    }
+    const riderId = selectedRiders[appRecord.id]
+      ? Number(selectedRiders[appRecord.id])
+      : null;
+
+    try {
+      const res = await api.post(`/franchisee-applications/${appRecord.id}/review`, {
+        decision,
+        rejection_reason: reason,
+        assigned_delivery_user_id: decision === 'Approved' ? riderId : null,
+      });
+      setMessage(res.message || `Application ${appRecord.application_no} updated.`);
+      load();
+    } catch (err: any) {
+      setError(err.message || 'Failed to review franchisee application.');
+    }
+  };
+
+  const handleAssignRider = async (appRecord: any) => {
+    setError('');
+    setMessage('');
+    const riderId = selectedRiders[appRecord.id] || appRecord.assigned_delivery_user_id;
+    if (!riderId) {
+      setError('Please select a Delivery Staff rider first.');
       return;
     }
     try {
-      await api.post(`/admin/franchisees/${id}/review`, {
-        decision,
-        rejection_reason: reasons[id] || '',
+      const res = await api.post(`/franchisee-applications/${appRecord.id}/assign-delivery`, {
+        assigned_delivery_user_id: Number(riderId),
       });
-      setMessage(`Franchisee registration ${decision.toLowerCase()} successfully.`);
+      setMessage(res.message || 'Equipment delivery rider assigned.');
       load();
     } catch (err: any) {
-      setError(err.message || 'Failed to review franchisee.');
+      setError(err.message || 'Failed to assign rider.');
     }
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-slate-900">Pending Franchisee Approvals</h1>
+        <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-xs font-extrabold uppercase tracking-wider mb-1">
+          AICE Cotabato-JCDL Corporation • Official Franchisee Onboarding
+        </div>
+        <h1 className="text-xl font-bold text-slate-900">
+          Pending Franchisee Approvals & Equipment Delivery Dispatch
+        </h1>
         <p className="text-sm text-slate-600">
-          Review franchisees recruited by field agents. Only approved franchisees can log in and appear on the Store Map.
+          Review digitized NEW FRANCHISEE FORM submissions from Sales Agents, approve or reject
+          applicants, assign a Delivery Staff rider to deliver the freezer &amp; equipment kit, and
+          sign &ldquo;Noted By&rdquo;.
         </p>
       </div>
 
       {message && (
-        <div className="p-4 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-900">
+        <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50 text-sm font-semibold text-emerald-900">
           {message}
         </div>
       )}
       {error && (
-        <div className="p-4 rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-800">
+        <div className="p-4 rounded-xl border border-rose-200 bg-rose-50 text-sm font-semibold text-rose-800">
           {error}
         </div>
       )}
 
       {rows.length === 0 ? (
-        <div className="bg-white border border-slate-200 rounded-lg p-6 text-sm text-slate-500">
-          All caught up! There are no pending franchisee registrations waiting for review.
+        <div className="bg-white border border-slate-200 rounded-xl p-6 text-sm text-slate-500">
+          All caught up! There are no pending franchisee applications or unassigned equipment
+          deliveries.
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {rows.map((f) => (
             <div
               key={f.id}
-              className="bg-white border border-slate-200 rounded-lg p-5 flex flex-col justify-between space-y-4"
+              className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between space-y-4 shadow-xs"
             >
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-base font-bold text-slate-900">{f.store_name}</h2>
-                  <StatusText status={f.status} />
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-black px-2 py-0.5 rounded bg-slate-900 text-white">
+                      {f.application_no || `FR-${f.id}`}
+                    </span>
+                    <h2 className="text-base font-bold text-slate-900">{f.store_name}</h2>
+                  </div>
+                  <ApplicationStatusBadge status={f.status} />
                 </div>
-                <p className="text-xs text-slate-600">
-                  Owner: <strong className="text-slate-900">{f.owner_name}</strong> · Username:{' '}
-                  <span className="font-mono text-slate-800">@{f.username}</span>
-                </p>
-                <p className="text-xs text-slate-600">Address: {f.address}</p>
-                <p className="text-xs text-slate-600">
-                  Contact: <span className="font-mono">{f.contact_number}</span> · Coordinates:{' '}
-                  <span className="font-mono">
-                    ({f.lat}, {f.lng})
-                  </span>
-                </p>
-                <p className="text-xs font-medium text-blue-800 pt-1">
-                  Recruited by Agent: <strong>{f.agent_name}</strong> (@{f.agent_username})
-                </p>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                  <ApplicationWorkflowTimeline
+                    status={f.status}
+                    rejectionReason={f.rejection_reason}
+                    compact
+                  />
+                </div>
+
+                <div className="text-xs text-slate-600 space-y-1">
+                  <p>
+                    Applicant: <strong className="text-slate-900">{f.complete_name || f.owner_name}</strong>{' '}
+                    · Username: <span className="font-mono text-blue-700">@{f.username}</span> ·
+                    Applied: <span className="font-mono">{String(f.date_applied || '').slice(0, 10)}</span>
+                  </p>
+                  <p>
+                    Store Address: <strong className="text-slate-800">{f.full_address || f.address}</strong>
+                  </p>
+                  <p>
+                    Landmark: <span className="text-slate-800">{f.landmark || '—'}</span> · GPS:{' '}
+                    <span className="font-mono">
+                      ({Number(f.lat).toFixed(4)}, {Number(f.lng).toFixed(4)})
+                    </span>
+                  </p>
+                  <p>
+                    Contact: <span className="font-mono font-semibold">{f.contact_number}</span> ·
+                    Email: <span>{f.email}</span> · FB: <span>{f.facebook_account || '—'}</span>
+                  </p>
+                  <p className="text-slate-700 italic">Remarks: &ldquo;{f.remarks}&rdquo;</p>
+                  <p className="text-xs font-semibold text-blue-800 pt-0.5">
+                    Sales Agent: <strong>{f.agent_name}</strong> (@{f.agent_username})
+                  </p>
+                </div>
               </div>
 
-              <div className="space-y-2 pt-3 border-t border-slate-100">
-                <input
-                  type="text"
-                  aria-label={`Rejection reason for ${f.store_name}`}
-                  placeholder="Rejection reason (required if rejecting)..."
-                  value={reasons[f.id] || ''}
-                  onChange={(e) => setReasons({ ...reasons, [f.id]: e.target.value })}
-                  className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs"
-                />
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleReview(f.id, 'Approved')}
-                    className="px-4 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 whitespace-nowrap shrink-0"
+              <div className="space-y-2.5 pt-3 border-t border-slate-100">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                    Assign Delivery Staff Rider for Freezer &amp; Equipment Handover:
+                  </label>
+                  <select
+                    value={selectedRiders[f.id] ?? (f.assigned_delivery_user_id ? String(f.assigned_delivery_user_id) : '')}
+                    onChange={(e) =>
+                      setSelectedRiders({ ...selectedRiders, [f.id]: e.target.value })
+                    }
+                    className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs bg-white"
                   >
-                    Approve Franchisee
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleReview(f.id, 'Rejected')}
-                    className="px-4 py-1.5 rounded-lg border border-rose-300 bg-white text-rose-700 text-xs font-semibold hover:bg-rose-50 whitespace-nowrap shrink-0"
-                  >
-                    Reject with Reason
-                  </button>
+                    <option value="">-- Select Delivery Staff Rider (Optional on Approve) --</option>
+                    {riders.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.full_name} (@{r.username} • {r.contact_number})
+                      </option>
+                    ))}
+                  </select>
                 </div>
+
+                {f.status === 'Pending Admin Review' ? (
+                  <>
+                    <input
+                      type="text"
+                      aria-label={`Rejection reason for ${f.store_name}`}
+                      placeholder="Rejection reason (required if rejecting)..."
+                      value={reasons[f.id] || ''}
+                      onChange={(e) => setReasons({ ...reasons, [f.id]: e.target.value })}
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleReview(f, 'Approved')}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 whitespace-nowrap"
+                      >
+                        {selectedRiders[f.id] ? 'Approve & Assign Rider' : 'Approve Franchisee'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReview(f, 'Rejected')}
+                        className="px-3.5 py-1.5 rounded-lg border border-rose-300 bg-white text-rose-700 text-xs font-bold hover:bg-rose-50 whitespace-nowrap"
+                      >
+                        Reject with Reason
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedApplication(f)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 ml-auto"
+                      >
+                        Full Form &amp; Sign &ldquo;Noted By&rdquo;
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleAssignRider(f)}
+                      className="px-3.5 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700"
+                    >
+                      {f.status === 'Approved'
+                        ? 'Dispatch Rider (Mark For Delivery)'
+                        : 'Update Assigned Rider'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedApplication(f)}
+                      className="px-3.5 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-bold hover:bg-slate-800"
+                    >
+                      Open Paper Form / Sign &ldquo;Noted By&rdquo;
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ))}
         </div>
       )}
+
+      {selectedApplication && (
+        <FranchiseePaperFormModal
+          applicationId={selectedApplication.id}
+          initialApplication={selectedApplication}
+          viewerRole="admin"
+          onClose={() => setSelectedApplication(null)}
+          onUpdated={load}
+        />
+      )}
     </div>
   );
 };
 
-// ===== 5. ALL FRANCHISEES MANAGEMENT =====
+// ===== 5. ALL FRANCHISEES & APPLICATIONS MANAGEMENT =====
 export const FranchiseesManagementView: React.FC = () => {
   const [rows, setRows] = useState<any[]>([]);
+  const [summary, setSummary] = useState<any>({
+    total: 0,
+    pending_review: 0,
+    approved_only: 0,
+    for_delivery: 0,
+    delivered: 0,
+    active: 0,
+    rejected: 0,
+  });
   const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('');
+  const [selectedApplication, setSelectedApplication] = useState<any | null>(null);
 
   const load = (page = 1) => {
     api
       .get(
-        `/admin/franchisees?page=${page}&search=${encodeURIComponent(search)}&status=${status}`
+        `/franchisee-applications?page=${page}&search=${encodeURIComponent(
+          search
+        )}&status=${encodeURIComponent(status)}`
       )
       .then((res) => {
-        setRows(res.data);
-        setPagination(res.pagination);
+        setRows(res.data || []);
+        if (res.summary) setSummary(res.summary);
+        if (res.pagination) setPagination(res.pagination);
       });
   };
 
@@ -926,32 +1101,79 @@ export const FranchiseesManagementView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-slate-900">Franchisee Directory</h1>
-        <p className="text-sm text-slate-600">
-          Search, filter, and activate or deactivate franchisee accounts across the network.
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-xs font-extrabold uppercase tracking-wider mb-1">
+            AICE Cotabato-JCDL Corporation • NEW FRANCHISEE FORM Registry
+          </div>
+          <h1 className="text-xl font-bold text-slate-900">
+            Franchisee Applications &amp; Equipment Directory
+          </h1>
+          <p className="text-sm text-slate-600">
+            View all digitized NEW FRANCHISEE FORM records, filter by 5-step workflow status, assign
+            Delivery Staff riders, sign &ldquo;Noted By&rdquo;, or print/export official PDF forms.
+          </p>
+        </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-lg p-5">
+      {/* Summary Counts */}
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-slate-500">Total Forms</div>
+          <div className="text-xl font-bold font-mono text-slate-900">{summary.total || 0}</div>
+        </div>
+        <div className="bg-white border border-amber-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-amber-800">Pending Review</div>
+          <div className="text-xl font-bold font-mono text-amber-700">
+            {summary.pending_review || 0}
+          </div>
+        </div>
+        <div className="bg-white border border-blue-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-blue-800">Approved</div>
+          <div className="text-xl font-bold font-mono text-blue-700">
+            {summary.approved_only || 0}
+          </div>
+        </div>
+        <div className="bg-white border border-indigo-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-indigo-800">For Delivery</div>
+          <div className="text-xl font-bold font-mono text-indigo-700">
+            {summary.for_delivery || 0}
+          </div>
+        </div>
+        <div className="bg-white border border-emerald-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-emerald-800">Active Stores</div>
+          <div className="text-xl font-bold font-mono text-emerald-700">
+            {Number(summary.active || 0) + Number(summary.delivered || 0)}
+          </div>
+        </div>
+        <div className="bg-white border border-rose-200 rounded-xl p-3.5">
+          <div className="text-[11px] font-semibold text-rose-800">Rejected</div>
+          <div className="text-xl font-bold font-mono text-rose-700">{summary.rejected || 0}</div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <input
             type="search"
             aria-label="Search franchisees"
-            placeholder="Search store name, owner, or username..."
+            placeholder="Search application #, store name, applicant, or username..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full sm:w-72 px-3 py-1.5 rounded-lg border border-slate-300 text-sm"
+            className="w-full sm:w-80 px-3.5 py-2 rounded-lg border border-slate-300 text-sm"
           />
           <select
             aria-label="Filter franchisees by approval status"
             value={status}
             onChange={(e) => setStatus(e.target.value)}
-            className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm bg-white"
+            className="px-3.5 py-2 rounded-lg border border-slate-300 text-sm bg-white font-medium"
           >
-            <option value="">All Approval Statuses</option>
+            <option value="">All Workflow Statuses</option>
+            <option value="Pending Admin Review">Pending Admin Review</option>
             <option value="Approved">Approved</option>
-            <option value="Pending">Pending</option>
+            <option value="For Delivery">For Delivery</option>
+            <option value="Delivered">Delivered</option>
+            <option value="Active">Active</option>
             <option value="Rejected">Rejected</option>
           </select>
         </div>
@@ -960,44 +1182,78 @@ export const FranchiseesManagementView: React.FC = () => {
           <table className="w-full text-sm text-left">
             <thead>
               <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500">
-                <th className="py-2.5 pr-4">Store Name & Address</th>
-                <th className="py-2.5 pr-4">Owner & Username</th>
-                <th className="py-2.5 pr-4">Recruiting Agent</th>
-                <th className="py-2.5 pr-4">Approval Status</th>
-                <th className="py-2.5 pr-4">Login Status</th>
-                <th className="py-2.5 text-right">Action</th>
+                <th className="py-2.5 pr-4">App No. &amp; Store</th>
+                <th className="py-2.5 pr-4">Applicant &amp; Account</th>
+                <th className="py-2.5 pr-4">Sales Agent &amp; Rider</th>
+                <th className="py-2.5 pr-4">Freezer #</th>
+                <th className="py-2.5 pr-4">Workflow Status</th>
+                <th className="py-2.5 pr-4">Login Access</th>
+                <th className="py-2.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((f) => (
                 <tr key={f.id} className="hover:bg-slate-50">
-                  <td className="py-2.5 pr-4">
-                    <div className="font-semibold text-slate-900">{f.store_name}</div>
-                    <div className="text-xs text-slate-500">{f.address}</div>
+                  <td className="py-3 pr-4">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-slate-900 text-white">
+                        {f.application_no || `FR-${f.id}`}
+                      </span>
+                      <span className="font-semibold text-slate-900">{f.store_name}</span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {f.full_address || f.address}
+                    </div>
                   </td>
-                  <td className="py-2.5 pr-4">
-                    <div className="text-slate-800">{f.owner_name}</div>
+                  <td className="py-3 pr-4">
+                    <div className="text-slate-900 font-medium">
+                      {f.complete_name || f.owner_name}
+                    </div>
                     <div className="text-xs font-mono text-slate-500">
                       @{f.username} · {f.contact_number}
                     </div>
                   </td>
-                  <td className="py-2.5 pr-4 text-xs text-slate-700">
-                    {f.agent_name} (@{f.agent_username})
+                  <td className="py-3 pr-4 text-xs text-slate-700">
+                    <div>
+                      Agent: <strong>{f.agent_name}</strong>
+                    </div>
+                    <div className="text-slate-500">
+                      Rider: {f.assigned_delivery_name || 'Unassigned'}
+                    </div>
                   </td>
-                  <td className="py-2.5 pr-4">
-                    <StatusText status={f.status} />
+                  <td className="py-3 pr-4 font-mono text-xs font-bold text-emerald-800">
+                    {f.freezer_no || '—'}
+                  </td>
+                  <td className="py-3 pr-4">
+                    <ApplicationStatusBadge status={f.status} />
                     {f.rejection_reason && (
-                      <div className="text-[11px] text-rose-700">Reason: {f.rejection_reason}</div>
+                      <div className="text-[11px] text-rose-700 mt-0.5">
+                        Reason: {f.rejection_reason}
+                      </div>
                     )}
                   </td>
-                  <td className="py-2.5 pr-4">
+                  <td className="py-3 pr-4">
                     <StatusText status={f.is_active ? 'Active' : 'Inactive'} />
                   </td>
-                  <td className="py-2.5 text-right">
+                  <td className="py-3 text-right space-x-1.5 whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedApplication(f)}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-bold hover:bg-slate-800"
+                    >
+                      Paper Form / Manage
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadApplicationPdf(f)}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700"
+                    >
+                      PDF
+                    </button>
                     <button
                       type="button"
                       onClick={() => toggleUser(f.user_id)}
-                      className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
                     >
                       {f.is_active ? 'Deactivate' : 'Activate'}
                     </button>
@@ -1009,6 +1265,16 @@ export const FranchiseesManagementView: React.FC = () => {
         </div>
         <PaginationBar pagination={pagination} onPageChange={load} />
       </div>
+
+      {selectedApplication && (
+        <FranchiseePaperFormModal
+          applicationId={selectedApplication.id}
+          initialApplication={selectedApplication}
+          viewerRole="admin"
+          onClose={() => setSelectedApplication(null)}
+          onUpdated={() => load(pagination.page)}
+        />
+      )}
     </div>
   );
 };

@@ -24,12 +24,18 @@ export const MapPicker: React.FC<MapPickerProps> = ({
   const mapDiv = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
+  const onPickRef = useRef(onPick);
+
+  // Always keep onPickRef pointing at the latest callback so Leaflet's click event never uses a stale closure
+  useEffect(() => {
+    onPickRef.current = onPick;
+  }, [onPick]);
 
   useEffect(() => {
     if (!mapDiv.current || mapRef.current) return;
     const center: [number, number] =
-      lat !== null && lng !== null ? [lat, lng] : [14.5995, 120.9842];
-    const map = L.map(mapDiv.current).setView(center, 13);
+      lat !== null && lng !== null ? [lat, lng] : [7.2236, 124.2464];
+    const map = L.map(mapDiv.current).setView(center, 14);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
@@ -37,7 +43,7 @@ export const MapPicker: React.FC<MapPickerProps> = ({
     map.on('click', (e: L.LeafletMouseEvent) => {
       const cLat = Number(e.latlng.lat.toFixed(7));
       const cLng = Number(e.latlng.lng.toFixed(7));
-      onPick(cLat, cLng);
+      onPickRef.current(cLat, cLng);
     });
 
     mapRef.current = map;

@@ -5,7 +5,8 @@ INSERT IGNORE INTO roles (id, name) VALUES
   (1, 'admin'),
   (2, 'agent'),
   (3, 'franchisee'),
-  (4, 'delivery');
+  (4, 'delivery'),
+  (5, 'customer');
 
 -- Default Admin Account (Username: admin, Password: Admin@1234)
 INSERT IGNORE INTO users (role_id, username, password_hash, full_name, email, contact_number, is_active, must_change_password, is_test)

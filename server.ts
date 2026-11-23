@@ -43,6 +43,19 @@ import {
   checkChatbotIpAiLimit,
   ChatbotIpBucket,
   PromoDefinition,
+  FRANCHISEE_EQUIPMENT_ITEMS,
+  normalizeApplicationStatus,
+  canFranchiseeLogin,
+  canFranchiseeOrderReplenishment,
+  isValidPhMobileNumber,
+  normalizePhMobileNumber,
+  formatApplicationNumber,
+  composeApplicantFullName,
+  composeStoreFullAddress,
+  validateFranchiseeStep1,
+  validateFranchiseeStep2,
+  buildFranchiseeOrderQrUrl,
+  buildStorePosterQrUrl,
 } from './src/utils/domainRules';
 
 // Initialize schema, seed.sql, and seed_test.sql accounts
@@ -50,11 +63,13 @@ initDatabase();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'aice_franchise_secret_key_2026';
 
-// Ensure upload directories exist inside server/uploads/products/ and server/uploads/proofs/
+// Ensure upload directories exist inside server/uploads/products/, proofs/, and stores/
 const productsUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'products');
 const proofsUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'proofs');
+const storesUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'stores');
 fs.mkdirSync(productsUploadDir, { recursive: true });
 fs.mkdirSync(proofsUploadDir, { recursive: true });
+fs.mkdirSync(storesUploadDir, { recursive: true });
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
 const ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
@@ -85,6 +100,7 @@ function makeUploader(destDir: string, prefix: string) {
 
 const uploadProductImage = makeUploader(productsUploadDir, 'prod');
 const uploadProofImage = makeUploader(proofsUploadDir, 'proof');
+const uploadStoreImage = makeUploader(storesUploadDir, 'store');
 
 function deleteUploadedFile(imageUrl: string | null | undefined) {
   if (!imageUrl) return;
@@ -175,6 +191,8 @@ interface AuthenticatedUser {
   role: 'admin' | 'agent' | 'franchisee' | 'delivery';
   franchiseeId?: number;
   storeName?: string;
+  applicationId?: number;
+  applicationStatus?: string;
   agentId?: number;
 }
 
@@ -219,12 +237,18 @@ function authenticate(req: Request, res: Response, next: NextFunction) {
       const fr = db
         .prepare('SELECT id, status, store_name FROM franchisees WHERE user_id = ?')
         .get(user.id) as { id: number; status: string; store_name: string } | undefined;
-      if (!fr || fr.status !== 'Approved') {
+      const appRow = db
+        .prepare('SELECT id, status FROM franchisee_applications WHERE user_id = ?')
+        .get(user.id) as { id: number; status: string } | undefined;
+      const effectiveStatus = appRow?.status || fr?.status || 'Pending Admin Review';
+      if (!fr || !canFranchiseeLogin(effectiveStatus)) {
         res.status(403).json({ message: 'Franchisee account is not approved.' });
         return;
       }
       user.franchiseeId = fr.id;
       user.storeName = fr.store_name;
+      user.applicationId = appRow?.id;
+      user.applicationStatus = normalizeApplicationStatus(effectiveStatus);
     }
 
     if (user.role === 'agent') {
@@ -278,9 +302,9 @@ function requireWarehouse(_req: Request, res: Response, next: NextFunction) {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
 
-  // Serve product photos and proof of delivery photos statically from server/uploads/
+  // Serve product photos, store photos, and proof of delivery photos statically from server/uploads/
   app.use('/uploads', express.static(path.resolve(process.cwd(), 'server', 'uploads')));
 
   const api = express.Router();
@@ -323,7 +347,33 @@ async function startServer() {
     next();
   };
 
-  const getPublicSettingsMap = () => {
+  const resolveAppBaseUrl = (req?: Request): string => {
+    const rawEnvBase = String(
+      process.env.APP_BASE_URL || process.env.VITE_APP_BASE_URL || process.env.APP_URL || ''
+    ).trim();
+    if (
+      rawEnvBase &&
+      rawEnvBase !== 'MY_APP_URL' &&
+      rawEnvBase !== 'MY_APP_BASE_URL' &&
+      !/^https?:\/\/localhost\b/i.test(rawEnvBase)
+    ) {
+      return rawEnvBase.replace(/\/+$/, '');
+    }
+    if (req) {
+      const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
+        .split(',')[0]
+        .trim();
+      const host = String(req.headers['x-forwarded-host'] || req.get('host') || '')
+        .split(',')[0]
+        .trim();
+      if (host) {
+        return `${proto}://${host}`.replace(/\/+$/, '');
+      }
+    }
+    return rawEnvBase.replace(/\/+$/, '');
+  };
+
+  const getPublicSettingsMap = (req?: Request) => {
     const rows = db
       .prepare('SELECT key, value FROM system_settings')
       .all() as { key: string; value: string }[];
@@ -331,6 +381,7 @@ async function startServer() {
     for (const r of rows) {
       map[r.key] = r.value;
     }
+    const appBaseUrl = resolveAppBaseUrl(req);
     return {
       show_public_prices:
         (map.show_public_prices ?? process.env.PUBLIC_SHOW_PRICES ?? '0') === '1',
@@ -340,6 +391,8 @@ async function startServer() {
       contact_phone: sanitizePublicText(
         map.contact_phone || process.env.PUBLIC_CONTACT_PHONE || '+63 (02) 8888-2423'
       ),
+      app_base_url: appBaseUrl,
+      franchisee_order_qr_url: buildFranchiseeOrderQrUrl(appBaseUrl),
     };
   };
 
@@ -447,9 +500,9 @@ async function startServer() {
     res.json({ data });
   });
 
-  // GET /api/public/settings: safe public contact email, phone, and show_public_prices toggle
-  api.get('/public/settings', (_req, res) => {
-    res.json(getPublicSettingsMap());
+  // GET /api/public/settings: safe public contact email, phone, show_public_prices toggle, and QR ordering URL
+  api.get('/public/settings', (req, res) => {
+    res.json(getPublicSettingsMap(req));
   });
 
   // Per-IP rate limiter store for public chatbot (10 messages/min, 5 AI calls/hour)
@@ -696,19 +749,34 @@ async function startServer() {
         res.status(403).json({ message: 'Franchisee profile missing.' });
         return;
       }
-      if (fr.status === 'Pending') {
+      const appRow = db
+        .prepare(
+          'SELECT id, application_no, status, rejection_reason, freezer_no FROM franchisee_applications WHERE user_id = ?'
+        )
+        .get(user.id) as any;
+      const effectiveStatus = normalizeApplicationStatus(appRow?.status || fr.status || 'Pending Admin Review');
+      if (effectiveStatus === 'Pending Admin Review') {
         res.status(403).json({
-          message: 'Your franchisee account is currently Pending Admin approval and cannot log in yet.',
+          message:
+            'Your account is not active yet. Your franchisee application is currently Pending Admin Review and cannot log in yet.',
         });
         return;
       }
-      if (fr.status === 'Rejected') {
+      if (effectiveStatus === 'Rejected') {
+        const reason = appRow?.rejection_reason || fr.rejection_reason || 'Please contact your recruiting agent.';
         res.status(403).json({
-          message: `Your franchisee registration was Rejected: ${fr.rejection_reason || 'Please contact your recruiting agent.'}`,
+          message: `Your franchisee registration was Rejected: ${reason}`,
         });
         return;
       }
-      franchisee = fr;
+      franchisee = {
+        ...fr,
+        application_id: appRow?.id || null,
+        application_no: appRow?.application_no || null,
+        application_status: effectiveStatus,
+        freezer_no: appRow?.freezer_no || '',
+        can_order_replenishment: canFranchiseeOrderReplenishment(effectiveStatus),
+      };
     }
 
     const wh = db
@@ -741,6 +809,11 @@ async function startServer() {
               address: franchisee.address,
               lat: franchisee.lat,
               lng: franchisee.lng,
+              application_id: franchisee.application_id,
+              application_no: franchisee.application_no,
+              application_status: franchisee.application_status,
+              freezer_no: franchisee.freezer_no,
+              can_order_replenishment: franchisee.can_order_replenishment,
             }
           : null,
       },
@@ -755,12 +828,29 @@ async function startServer() {
 
     let franchisee: any = null;
     if (req.user!.role === 'franchisee') {
-      franchisee =
-        db
-          .prepare(
-            'SELECT id, owner_name, store_name, address, contact_number, lat, lng, status FROM franchisees WHERE user_id = ?'
-          )
-          .get(req.user!.id) || null;
+      const fr = db
+        .prepare(
+          'SELECT id, owner_name, store_name, address, contact_number, lat, lng, status FROM franchisees WHERE user_id = ?'
+        )
+        .get(req.user!.id) as any;
+      const appRow = db
+        .prepare(
+          'SELECT id, application_no, status, freezer_no FROM franchisee_applications WHERE user_id = ?'
+        )
+        .get(req.user!.id) as any;
+      if (fr) {
+        const effectiveStatus = normalizeApplicationStatus(
+          appRow?.status || fr.status || 'Approved'
+        );
+        franchisee = {
+          ...fr,
+          application_id: appRow?.id || null,
+          application_no: appRow?.application_no || null,
+          application_status: effectiveStatus,
+          freezer_no: appRow?.freezer_no || '',
+          can_order_replenishment: canFranchiseeOrderReplenishment(effectiveStatus),
+        };
+      }
     }
 
     res.json({
@@ -2212,26 +2302,416 @@ async function startServer() {
     });
   });
 
-  // ===== AGENT: REGISTER FRANCHISEE & LIST RECRUITS =====
-  api.post('/agent/franchisees', authorize('agent'), requireWarehouse, (req, res) => {
-    const { owner_name, store_name, address, contact_number, email, lat, lng, initial_password } = req.body;
-    if (!owner_name || !store_name || !address || !contact_number || !initial_password) {
+  // ===== DIGITIZED "NEW FRANCHISEE FORM" (AICE COTABATO-JCDL CORPORATION) =====
+  const getNextApplicationNo = (): string => {
+    const year = new Date().getFullYear();
+    const maxRow = db
+      .prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM franchisee_applications')
+      .get() as { max_id: number };
+    let seq = Number(maxRow?.max_id || 0) + 1;
+    for (let i = 0; i < 50; i++) {
+      const candidate = formatApplicationNumber(year, seq + i);
+      const exists = db
+        .prepare('SELECT id FROM franchisee_applications WHERE application_no = ?')
+        .get(candidate);
+      if (!exists) return candidate;
+    }
+    return formatApplicationNumber(year, Date.now() % 100000);
+  };
+
+  const findDuplicateApplicationFields = (
+    contactNumberRaw: string,
+    emailRaw: string,
+    storeNameRaw: string,
+    excludeApplicationId?: number | null,
+    excludeFranchiseeId?: number | null,
+    excludeUserId?: number | null
+  ): Record<string, string> => {
+    const errors: Record<string, string> = {};
+    const normContact = normalizePhMobileNumber(contactNumberRaw || '');
+    const cleanEmail = String(emailRaw || '').trim().toLowerCase();
+    const cleanStore = String(storeNameRaw || '').trim().toLowerCase();
+
+    const appExclId = Number(excludeApplicationId || 0);
+    const frExclId = Number(excludeFranchiseeId || 0);
+    const uExclId = Number(excludeUserId || 0);
+
+    if (normContact) {
+      const dupAppContact = db
+        .prepare(
+          `SELECT id, application_no, store_name
+           FROM franchisee_applications
+           WHERE id != ?
+             AND (REPLACE(REPLACE(contact_number, ' ', ''), '-', '') = ?
+               OR REPLACE(REPLACE(contact_number, ' ', ''), '-', '') = ?)`
+        )
+        .get(
+          appExclId,
+          normContact,
+          normContact.startsWith('09') ? `+63${normContact.slice(1)}` : normContact
+        ) as { id: number; application_no: string; store_name: string } | undefined;
+
+      const dupUserContact = db
+        .prepare(
+          `SELECT id, username
+           FROM users
+           WHERE id != ?
+             AND (REPLACE(REPLACE(COALESCE(contact_number, ''), ' ', ''), '-', '') = ?)`
+        )
+        .get(uExclId, normContact) as { id: number; username: string } | undefined;
+
+      if (dupAppContact || dupUserContact) {
+        errors.contact_number = 'This mobile contact number is already registered to another account/application.';
+      }
+    }
+
+    if (cleanEmail) {
+      const dupAppEmail = db
+        .prepare(
+          `SELECT id FROM franchisee_applications
+           WHERE id != ? AND LOWER(TRIM(email)) = ?`
+        )
+        .get(appExclId, cleanEmail);
+      const dupUserEmail = db
+        .prepare(
+          `SELECT id FROM users
+           WHERE id != ? AND LOWER(TRIM(COALESCE(email, ''))) = ?`
+        )
+        .get(uExclId, cleanEmail);
+      if (dupAppEmail || dupUserEmail) {
+        errors.email = 'This email address is already registered to another user or application.';
+      }
+    }
+
+    if (cleanStore) {
+      const dupAppStore = db
+        .prepare(
+          `SELECT id FROM franchisee_applications
+           WHERE id != ? AND LOWER(TRIM(store_name)) = ?`
+        )
+        .get(appExclId, cleanStore);
+      const dupFrStore = db
+        .prepare(
+          `SELECT id FROM franchisees
+           WHERE id != ? AND LOWER(TRIM(store_name)) = ?`
+        )
+        .get(frExclId, cleanStore);
+      if (dupAppStore || dupFrStore) {
+        errors.store_name = 'A franchisee store with this store name already exists.';
+      }
+    }
+
+    return errors;
+  };
+
+  const hydrateApplicationRecord = (appRow: any) => {
+    if (!appRow) return null;
+    const eqRows = db
+      .prepare(
+        `SELECT id, application_id, item, condition, quantity, freezer_no, updated_at
+         FROM franchisee_equipment
+         WHERE application_id = ?`
+      )
+      .all(appRow.id) as any[];
+
+    const eqMap: Record<string, any> = {};
+    for (const r of eqRows) {
+      eqMap[r.item] = r;
+    }
+
+    const equipment = FRANCHISEE_EQUIPMENT_ITEMS.map((itemName) => {
+      const found = eqMap[itemName];
+      const cond = (found?.condition || 'NOT_ISSUED') as 'NEW' | 'OLD' | 'NOT_ISSUED';
+      return {
+        item_name: itemName,
+        item: itemName,
+        item_condition: cond,
+        condition_status: cond,
+        condition: cond,
+        quantity: Number(found?.quantity || 0),
+        freezer_no:
+          itemName === 'Freezer'
+            ? String(found?.freezer_no || appRow.freezer_no || '')
+            : String(found?.freezer_no || ''),
+        updated_at: found?.updated_at || null,
+      };
+    });
+
+    const sigRows = db
+      .prepare(
+        `SELECT fs.id, fs.application_id, fs.role, fs.printed_name, fs.signature_image,
+                fs.signed_by_user_id, fs.signed_at, u.full_name AS signed_by_user_name
+         FROM franchisee_signatures fs
+         LEFT JOIN users u ON u.id = fs.signed_by_user_id
+         WHERE fs.application_id = ?`
+      )
+      .all(appRow.id) as any[];
+
+    const signatures: Record<string, any> = {};
+    for (const s of sigRows) {
+      signatures[s.role] = {
+        ...s,
+        signature_data: s.signature_image,
+      };
+    }
+
+    const normalizedStatus = normalizeApplicationStatus(appRow.status);
+
+    return {
+      ...appRow,
+      id: Number(appRow.id),
+      application_id: Number(appRow.id),
+      franchisee_id: Number(appRow.franchisee_id),
+      user_id: Number(appRow.user_id),
+      agent_id: Number(appRow.agent_id),
+      owner_name: appRow.complete_name || appRow.owner_name,
+      address: appRow.full_address || appRow.address,
+      status: normalizedStatus,
+      application_status: normalizedStatus,
+      legacy_status:
+        appRow.franchisee_status ||
+        (normalizedStatus === 'Pending Admin Review'
+          ? 'Pending'
+          : normalizedStatus === 'Rejected'
+          ? 'Rejected'
+          : 'Approved'),
+      assigned_delivery_staff_name: appRow.assigned_delivery_name || null,
+      assigned_delivery_staff_contact: appRow.assigned_delivery_contact || null,
+      can_login: canFranchiseeLogin(normalizedStatus),
+      can_order_replenishment: canFranchiseeOrderReplenishment(normalizedStatus),
+      equipment,
+      signatures,
+      signatures_by_role: signatures,
+      signatures_list: sigRows,
+    };
+  };
+
+  const getHydratedApplicationBy = (
+    column: 'fa.id' | 'fa.franchisee_id' | 'fa.user_id',
+    idVal: number
+  ) => {
+    const row = db
+      .prepare(
+        `SELECT fa.*,
+                f.status AS franchisee_status,
+                u.username, u.is_active,
+                au.full_name AS agent_name, au.username AS agent_username, au.contact_number AS agent_contact,
+                du.full_name AS assigned_delivery_name, du.username AS assigned_delivery_username, du.contact_number AS assigned_delivery_contact,
+                apu.full_name AS approved_by_name
+         FROM franchisee_applications fa
+         JOIN franchisees f ON f.id = fa.franchisee_id
+         JOIN users u ON u.id = fa.user_id
+         JOIN agents a ON a.id = fa.agent_id
+         JOIN users au ON au.id = a.user_id
+         LEFT JOIN users du ON du.id = fa.assigned_delivery_user_id
+         LEFT JOIN users apu ON apu.id = fa.approved_by
+         WHERE ${column} = ?`
+      )
+      .get(idVal) as any;
+
+    return hydrateApplicationRecord(row);
+  };
+
+  const resolveApplicationByParamId = (rawId: number) => {
+    return (
+      getHydratedApplicationBy('fa.id', rawId) ||
+      getHydratedApplicationBy('fa.franchisee_id', rawId)
+    );
+  };
+
+  const upsertSignatureRow = (
+    applicationId: number,
+    role: 'customer' | 'sales_agent' | 'delivery_team' | 'driver' | 'collector' | 'noted_by',
+    printedName: string,
+    signatureImage: string | null | undefined,
+    signedByUserId: number | null
+  ) => {
+    const cleanName = String(printedName || '').trim();
+    const cleanImg = signatureImage && String(signatureImage).trim() ? String(signatureImage).trim() : '';
+    if (!cleanName && !cleanImg) return;
+    db.prepare(
+      `INSERT INTO franchisee_signatures (application_id, role, printed_name, signature_image, signed_by_user_id, signed_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(application_id, role) DO UPDATE SET
+         printed_name = CASE WHEN excluded.printed_name != '' THEN excluded.printed_name ELSE franchisee_signatures.printed_name END,
+         signature_image = CASE WHEN excluded.signature_image != '' THEN excluded.signature_image ELSE franchisee_signatures.signature_image END,
+         signed_by_user_id = COALESCE(excluded.signed_by_user_id, franchisee_signatures.signed_by_user_id),
+         signed_at = datetime('now')`
+    ).run(applicationId, role, cleanName, cleanImg, signedByUserId);
+  };
+
+  // Duplicate check endpoint for Agent registration wizard
+  api.get(
+    '/franchisee-applications/check-duplicate',
+    authorize('agent', 'admin'),
+    requireWarehouse,
+    (req, res) => {
+      const contactNumber = String(req.query.contact_number || '').trim();
+      const email = String(req.query.email || '').trim();
+      const storeName = String(req.query.store_name || '').trim();
+      const excludeAppId = req.query.exclude_id ? Number(req.query.exclude_id) : null;
+
+      let exclFrId: number | null = null;
+      let exclUserId: number | null = null;
+      if (excludeAppId) {
+        const cur = resolveApplicationByParamId(excludeAppId);
+        if (cur) {
+          exclFrId = cur.franchisee_id;
+          exclUserId = cur.user_id;
+        }
+      }
+
+      const errors = findDuplicateApplicationFields(
+        contactNumber,
+        email,
+        storeName,
+        excludeAppId,
+        exclFrId,
+        exclUserId
+      );
+
+      res.json({
+        hasDuplicates: Object.keys(errors).length > 0,
+        errors,
+      });
+    }
+  );
+
+  // Active Delivery Staff options for Admin to assign equipment delivery
+  api.get(
+    '/franchisee-applications/delivery-staff-options',
+    authorize('admin'),
+    requireWarehouse,
+    (_req, res) => {
+      const riders = db
+        .prepare(
+          `SELECT u.id, u.full_name, u.username, u.contact_number
+           FROM users u
+           JOIN roles r ON r.id = u.role_id
+           WHERE r.name = 'delivery' AND u.is_active = 1
+           ORDER BY u.full_name ASC`
+        )
+        .all();
+      res.json({ data: riders });
+    }
+  );
+
+  // Franchisee read-only view of their own registration & equipment record
+  api.get(
+    '/franchisee-applications/my',
+    authorize('franchisee'),
+    requireWarehouse,
+    (req, res) => {
+      const record = getHydratedApplicationBy('fa.user_id', req.user!.id);
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application record not found.' });
+        return;
+      }
+      res.json({ data: record });
+    }
+  );
+
+  // Handler for creating a new franchisee application (used by POST /api/franchisee-applications and POST /api/agent/franchisees)
+  const handleCreateFranchiseeApplication = (req: Request, res: Response) => {
+    const body = req.body || {};
+
+    // Support both structured Section 1 fields and legacy owner_name/address fallback
+    const todayStr = (db.prepare("SELECT date('now') AS d").get() as { d: string }).d;
+    const dateApplied = String(body.date_applied || todayStr).trim().slice(0, 10);
+
+    let firstName = String(body.first_name || '').trim();
+    let middleName = String(body.middle_name || '').trim();
+    let lastName = String(body.last_name || '').trim();
+    if ((!firstName || !lastName) && body.owner_name) {
+      const parts = String(body.owner_name).trim().split(/\s+/);
+      firstName = firstName || parts[0] || '';
+      lastName = lastName || (parts.length > 1 ? parts.slice(1).join(' ') : parts[0] || '');
+    }
+
+    let street = String(body.street || '').trim();
+    let barangay = String(body.barangay || '').trim();
+    let cityMunicipality = String(body.city_municipality || '').trim();
+    let province = String(body.province || '').trim();
+    if ((!street || !barangay || !cityMunicipality || !province) && body.address) {
+      const addrParts = String(body.address)
+        .split(',')
+        .map((p: string) => p.trim())
+        .filter(Boolean);
+      street = street || addrParts[0] || String(body.address).trim();
+      barangay = barangay || addrParts[1] || ' Poblacion';
+      cityMunicipality = cityMunicipality || addrParts[2] || 'Cotabato City';
+      province = province || addrParts[3] || 'Maguindanao del Norte';
+    }
+
+    const storeName = String(body.store_name || '').trim();
+    const contactNumberRaw = String(body.contact_number || '').trim();
+    const landmark = String(body.landmark || 'Near main thoroughfare').trim();
+    const facebookAccount = String(body.facebook_account || '').trim();
+    const email = String(body.email || '').trim();
+    const remarks = String(body.remarks || 'New franchisee application submitted by Sales Agent.').trim();
+    const initialPassword = String(body.initial_password || '');
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+
+    const step1Check = validateFranchiseeStep1(
+      {
+        date_applied: dateApplied,
+        first_name: firstName,
+        middle_name: middleName,
+        last_name: lastName,
+        contact_number: contactNumberRaw,
+        store_name: storeName,
+        email,
+        facebook_account: facebookAccount,
+        remarks,
+        initial_password: initialPassword,
+      },
+      true
+    );
+
+    const step2Check = validateFranchiseeStep2({
+      street,
+      barangay,
+      city_municipality: cityMunicipality,
+      province,
+      landmark,
+      lat,
+      lng,
+    });
+
+    const combinedErrors: Record<string, string> = {
+      ...step1Check.errors,
+      ...step2Check.errors,
+    };
+
+    if (Object.keys(combinedErrors).length > 0) {
+      if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+      const firstErrMsg = Object.values(combinedErrors)[0];
       res.status(400).json({
-        message: 'Owner name, store name, address, contact number, and initial password are required.',
+        message: firstErrMsg,
+        errors: combinedErrors,
       });
       return;
     }
-    if (!isValidCoords(lat, lng)) {
-      res.status(400).json({ message: 'Please pin a valid store location on the map.' });
-      return;
-    }
-    if (String(initial_password).length < 8) {
-      res.status(400).json({ message: 'Initial password must be at least 8 characters.' });
+
+    const dupErrors = findDuplicateApplicationFields(contactNumberRaw, email, storeName);
+    if (Object.keys(dupErrors).length > 0) {
+      if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+      const firstDupMsg = Object.values(dupErrors)[0];
+      res.status(409).json({
+        message: firstDupMsg,
+        errors: dupErrors,
+      });
       return;
     }
 
-    const username = generateFranchiseeUsername(String(owner_name), String(store_name));
-    const hash = bcrypt.hashSync(String(initial_password), 10);
+    const normalizedContact = normalizePhMobileNumber(contactNumberRaw);
+    const completeName = composeApplicantFullName(firstName, middleName, lastName);
+    const fullAddress = composeStoreFullAddress(street, barangay, cityMunicipality, province);
+    const username = generateFranchiseeUsername(completeName, storeName);
+    const applicationNo = getNextApplicationNo();
+    const hash = bcrypt.hashSync(initialPassword, 10);
+    const storePhotoUrl = req.file ? `/uploads/stores/${req.file.filename}` : null;
 
     const tx = db.transaction(() => {
       const role = db.prepare("SELECT id FROM roles WHERE name = 'franchisee'").get() as { id: number };
@@ -2244,10 +2724,11 @@ async function startServer() {
           role.id,
           username,
           hash,
-          String(owner_name).trim(),
-          email ? String(email).trim() : null,
-          String(contact_number).trim()
+          completeName,
+          email,
+          normalizedContact
         );
+      const newUserId = Number(uRes.lastInsertRowid);
 
       const fRes = db
         .prepare(
@@ -2255,78 +2736,222 @@ async function startServer() {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`
         )
         .run(
-          Number(uRes.lastInsertRowid),
+          newUserId,
           req.user!.agentId,
-          String(owner_name).trim(),
-          String(store_name).trim(),
-          String(address).trim(),
-          String(contact_number).trim(),
-          Number(lat),
-          Number(lng)
+          completeName,
+          storeName,
+          fullAddress,
+          normalizedContact,
+          lat,
+          lng
         );
+      const newFranchiseeId = Number(fRes.lastInsertRowid);
 
-      const fId = Number(fRes.lastInsertRowid);
-      notifyAdmins(
-        'New Pending Franchisee',
-        `Agent ${req.user!.full_name} registered "${String(store_name).trim()}" (${String(owner_name).trim()}). Waiting for review.`,
-        'approval',
-        fId
+      const appRes = db
+        .prepare(
+          `INSERT INTO franchisee_applications (
+             application_no, franchisee_id, user_id, agent_id, date_applied,
+             first_name, middle_name, last_name, complete_name, contact_number,
+             store_name, street, barangay, city_municipality, province, full_address,
+             landmark, facebook_account, email, remarks, lat, lng, store_photo_url,
+             freezer_no, status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'Pending Admin Review', datetime('now'), datetime('now'))`
+        )
+        .run(
+          applicationNo,
+          newFranchiseeId,
+          newUserId,
+          req.user!.agentId,
+          dateApplied,
+          firstName,
+          middleName,
+          lastName,
+          completeName,
+          normalizedContact,
+          storeName,
+          street,
+          barangay,
+          cityMunicipality,
+          province,
+          fullAddress,
+          landmark,
+          facebookAccount,
+          email,
+          remarks,
+          lat,
+          lng,
+          storePhotoUrl
+        );
+      const newAppId = Number(appRes.lastInsertRowid);
+
+      // Initialize the 6 equipment checklist items as NOT_ISSUED (to be completed by Delivery Staff at delivery)
+      const insEq = db.prepare(
+        `INSERT INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no)
+         VALUES (?, ?, 'NOT_ISSUED', 0, '')`
       );
+      for (const itemName of FRANCHISEE_EQUIPMENT_ITEMS) {
+        insEq.run(newAppId, itemName);
+      }
+
+      // Record Sales Agent auto-filled sign-off in Section 3
+      upsertSignatureRow(
+        newAppId,
+        'sales_agent',
+        req.user!.full_name,
+        body.sales_agent_signature || null,
+        req.user!.id
+      );
+
+      notifyAdmins(
+        `New Franchisee Application (${applicationNo})`,
+        `Sales Agent ${req.user!.full_name} submitted NEW FRANCHISEE FORM ${applicationNo} for "${storeName}" (${completeName}). Waiting for Admin review.`,
+        'approval',
+        newAppId
+      );
+
       logActivity(
         req.user!.id,
         'FRANCHISEE_REGISTERED',
         'franchisee',
-        fId,
-        `Registered pending franchisee ${String(store_name).trim()} (@${username})`
+        newFranchiseeId,
+        `Submitted application ${applicationNo} for ${storeName} (@${username})`
       );
-      return fId;
+
+      return { newAppId, newFranchiseeId };
     });
 
-    const franchiseeId = tx();
+    const { newAppId, newFranchiseeId } = tx();
+    const hydrated = getHydratedApplicationBy('fa.id', newAppId);
+
     res.status(201).json({
-      message: 'Franchisee registered as Pending and submitted for Admin approval.',
-      franchiseeId,
+      message: `Franchisee application ${applicationNo} submitted for Admin review.`,
+      applicationId: newAppId,
+      applicationNo,
+      franchiseeId: newFranchiseeId,
       generatedUsername: username,
+      application: hydrated,
     });
-  });
+  };
 
-  api.get('/agent/recruits', authorize('agent'), requireWarehouse, (req, res) => {
+  api.post(
+    '/franchisee-applications',
+    authorize('agent'),
+    requireWarehouse,
+    uploadStoreImage.single('store_photo'),
+    handleCreateFranchiseeApplication
+  );
+
+  api.post(
+    '/agent/franchisees',
+    authorize('agent'),
+    requireWarehouse,
+    uploadStoreImage.single('store_photo'),
+    handleCreateFranchiseeApplication
+  );
+
+  // List franchisee applications (role-filtered for Admin, Agent, Delivery Staff, Franchisee)
+  const handleListFranchiseeApplications = (req: Request, res: Response) => {
     const { page, limit, offset } = parsePagination(req.query);
     const search = `%${String(req.query.search || '').trim()}%`;
-    const status = String(req.query.status || '');
-    const params: any[] = [req.user!.agentId, search, search];
-    let where = 'WHERE f.agent_id = ? AND (f.store_name LIKE ? OR f.owner_name LIKE ?)';
-    if (['Pending', 'Approved', 'Rejected'].includes(status)) {
-      where += ' AND f.status = ?';
-      params.push(status);
+    const statusParam = String(req.query.status || '').trim();
+
+    const params: any[] = [search, search, search, search, search];
+    let where =
+      'WHERE (fa.store_name LIKE ? OR fa.complete_name LIKE ? OR fa.application_no LIKE ? OR u.username LIKE ? OR fa.city_municipality LIKE ?)';
+
+    if (req.user!.role === 'agent') {
+      where += ' AND fa.agent_id = ?';
+      params.push(req.user!.agentId);
+    } else if (req.user!.role === 'delivery') {
+      if (req.query.all_for_delivery === '1') {
+        where += " AND (fa.assigned_delivery_user_id = ? OR fa.status IN ('For Delivery', 'Delivered', 'Active'))";
+        params.push(req.user!.id);
+      } else {
+        where += ' AND fa.assigned_delivery_user_id = ?';
+        params.push(req.user!.id);
+      }
+    } else if (req.user!.role === 'franchisee') {
+      where += ' AND fa.user_id = ?';
+      params.push(req.user!.id);
+    }
+
+    if (statusParam) {
+      if (statusParam === 'Pending' || statusParam === 'Pending Admin Review') {
+        where += " AND fa.status = 'Pending Admin Review'";
+      } else if (statusParam === 'Approved_Group') {
+        where += " AND fa.status IN ('Approved', 'For Delivery', 'Delivered', 'Active')";
+      } else if (
+        ['Approved', 'Rejected', 'For Delivery', 'Delivered', 'Active'].includes(statusParam)
+      ) {
+        where += ' AND fa.status = ?';
+        params.push(statusParam);
+      }
     }
 
     const totalRow = db
-      .prepare(`SELECT COUNT(*) AS total FROM franchisees f ${where}`)
+      .prepare(
+        `SELECT COUNT(*) AS total
+         FROM franchisee_applications fa
+         JOIN users u ON u.id = fa.user_id
+         ${where}`
+      )
       .get(...params) as { total: number };
 
-    const rows = db
+    const rawRows = db
       .prepare(
-        `SELECT f.*, u.username, u.email, u.is_active
-         FROM franchisees f
-         JOIN users u ON u.id = f.user_id
+        `SELECT fa.*,
+                f.status AS franchisee_status,
+                u.username, u.is_active,
+                au.full_name AS agent_name, au.username AS agent_username, au.contact_number AS agent_contact,
+                du.full_name AS assigned_delivery_name, du.username AS assigned_delivery_username, du.contact_number AS assigned_delivery_contact,
+                apu.full_name AS approved_by_name
+         FROM franchisee_applications fa
+         JOIN franchisees f ON f.id = fa.franchisee_id
+         JOIN users u ON u.id = fa.user_id
+         JOIN agents a ON a.id = fa.agent_id
+         JOIN users au ON au.id = a.user_id
+         LEFT JOIN users du ON du.id = fa.assigned_delivery_user_id
+         LEFT JOIN users apu ON apu.id = fa.approved_by
          ${where}
-         ORDER BY f.id DESC LIMIT ? OFFSET ?`
+         ORDER BY fa.id DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(...params, limit, offset);
+      .all(...params, limit, offset) as any[];
+
+    const data = rawRows.map((r) => hydrateApplicationRecord(r));
+
+    // Role-scoped summary counts
+    let summaryWhere = 'WHERE 1=1';
+    const summaryParams: any[] = [];
+    if (req.user!.role === 'agent') {
+      summaryWhere += ' AND agent_id = ?';
+      summaryParams.push(req.user!.agentId);
+    } else if (req.user!.role === 'delivery') {
+      summaryWhere += ' AND assigned_delivery_user_id = ?';
+      summaryParams.push(req.user!.id);
+    } else if (req.user!.role === 'franchisee') {
+      summaryWhere += ' AND user_id = ?';
+      summaryParams.push(req.user!.id);
+    }
 
     const counts = db
       .prepare(
         `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN status = 'Approved' THEN 1 ELSE 0 END), 0) AS approved,
-                COALESCE(SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END), 0) AS pending,
+                COALESCE(SUM(CASE WHEN status = 'Pending Admin Review' THEN 1 ELSE 0 END), 0) AS pending,
+                COALESCE(SUM(CASE WHEN status = 'Pending Admin Review' THEN 1 ELSE 0 END), 0) AS pending_review,
+                COALESCE(SUM(CASE WHEN status IN ('Approved', 'For Delivery', 'Delivered', 'Active') THEN 1 ELSE 0 END), 0) AS approved,
+                COALESCE(SUM(CASE WHEN status = 'Approved' THEN 1 ELSE 0 END), 0) AS approved_only,
+                COALESCE(SUM(CASE WHEN status = 'For Delivery' THEN 1 ELSE 0 END), 0) AS for_delivery,
+                COALESCE(SUM(CASE WHEN status = 'Delivered' THEN 1 ELSE 0 END), 0) AS delivered,
+                COALESCE(SUM(CASE WHEN status = 'Active' THEN 1 ELSE 0 END), 0) AS active,
                 COALESCE(SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END), 0) AS rejected
-         FROM franchisees WHERE agent_id = ?`
+         FROM franchisee_applications
+         ${summaryWhere}`
       )
-      .get(req.user!.agentId);
+      .get(...summaryParams);
 
     res.json({
-      data: rows,
+      data,
       summary: counts,
       pagination: {
         page,
@@ -2335,116 +2960,992 @@ async function startServer() {
         totalPages: Math.ceil(totalRow.total / limit) || 1,
       },
     });
-  });
+  };
 
-  // ===== ADMIN: FRANCHISEE APPROVAL & MANAGEMENT =====
-  api.get('/admin/franchisees', authorize('admin'), requireWarehouse, (req, res) => {
-    const { page, limit, offset } = parsePagination(req.query);
-    const search = `%${String(req.query.search || '').trim()}%`;
-    const status = String(req.query.status || '');
-    const params: any[] = [search, search, search];
-    let where = 'WHERE (f.store_name LIKE ? OR f.owner_name LIKE ? OR u.username LIKE ?)';
-    if (['Pending', 'Approved', 'Rejected'].includes(status)) {
-      where += ' AND f.status = ?';
-      params.push(status);
+  api.get(
+    '/franchisee-applications',
+    authorize('admin', 'agent', 'delivery', 'franchisee'),
+    requireWarehouse,
+    handleListFranchiseeApplications
+  );
+
+  api.get('/agent/recruits', authorize('agent'), requireWarehouse, handleListFranchiseeApplications);
+  api.get('/admin/franchisees', authorize('admin'), requireWarehouse, handleListFranchiseeApplications);
+
+  // Single application details
+  api.get(
+    '/franchisee-applications/:id',
+    authorize('admin', 'agent', 'delivery', 'franchisee'),
+    requireWarehouse,
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
+
+      if (req.user!.role === 'agent' && record.agent_id !== req.user!.agentId) {
+        res.status(403).json({ message: 'Forbidden: you can only view your own recruits.' });
+        return;
+      }
+      if (req.user!.role === 'franchisee' && record.user_id !== req.user!.id) {
+        res.status(403).json({ message: 'Forbidden: you can only view your own registration form.' });
+        return;
+      }
+
+      res.json({ data: record });
+    }
+  );
+
+  // Full application payload formatted for official paper form print & PDF export
+  api.get(
+    '/franchisee-applications/:id/pdf',
+    authorize('admin', 'agent', 'delivery', 'franchisee'),
+    requireWarehouse,
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
+      if (req.user!.role === 'agent' && record.agent_id !== req.user!.agentId) {
+        res.status(403).json({ message: 'Forbidden.' });
+        return;
+      }
+      if (req.user!.role === 'franchisee' && record.user_id !== req.user!.id) {
+        res.status(403).json({ message: 'Forbidden.' });
+        return;
+      }
+
+      res.json({
+        company_header: 'AICE COTABATO-JCDL CORPORATION',
+        form_banner: 'NEW FRANCHISEE FORM',
+        generated_at: new Date().toISOString(),
+        data: record,
+      });
+    }
+  );
+
+  // Agent edits an application while it is still "Pending Admin Review"
+  api.put(
+    '/franchisee-applications/:id',
+    authorize('agent'),
+    requireWarehouse,
+    uploadStoreImage.single('store_photo'),
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
+
+      if (record.agent_id !== req.user!.agentId) {
+        if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+        res.status(403).json({ message: 'You can only edit applications you registered.' });
+        return;
+      }
+
+      if (record.status !== 'Pending Admin Review') {
+        if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+        res.status(400).json({
+          message: `Application ${record.application_no} is already "${record.status}" and can no longer be edited by the Agent.`,
+        });
+        return;
+      }
+
+      const body = req.body || {};
+      const dateApplied = String(body.date_applied || record.date_applied).trim().slice(0, 10);
+      const firstName = String(body.first_name ?? record.first_name).trim();
+      const middleName = String(body.middle_name ?? record.middle_name).trim();
+      const lastName = String(body.last_name ?? record.last_name).trim();
+      const contactNumberRaw = String(body.contact_number ?? record.contact_number).trim();
+      const storeName = String(body.store_name ?? record.store_name).trim();
+      const street = String(body.street ?? record.street).trim();
+      const barangay = String(body.barangay ?? record.barangay).trim();
+      const cityMunicipality = String(body.city_municipality ?? record.city_municipality).trim();
+      const province = String(body.province ?? record.province).trim();
+      const landmark = String(body.landmark ?? record.landmark).trim();
+      const facebookAccount = String(body.facebook_account ?? record.facebook_account).trim();
+      const email = String(body.email ?? record.email).trim();
+      const remarks = String(body.remarks ?? record.remarks).trim();
+      const initialPassword = body.initial_password ? String(body.initial_password) : '';
+      const lat = body.lat !== undefined ? Number(body.lat) : Number(record.lat);
+      const lng = body.lng !== undefined ? Number(body.lng) : Number(record.lng);
+
+      const step1Check = validateFranchiseeStep1(
+        {
+          date_applied: dateApplied,
+          first_name: firstName,
+          middle_name: middleName,
+          last_name: lastName,
+          contact_number: contactNumberRaw,
+          store_name: storeName,
+          email,
+          facebook_account: facebookAccount,
+          remarks,
+          initial_password: initialPassword,
+        },
+        false
+      );
+
+      const step2Check = validateFranchiseeStep2({
+        street,
+        barangay,
+        city_municipality: cityMunicipality,
+        province,
+        landmark,
+        lat,
+        lng,
+      });
+
+      const combinedErrors: Record<string, string> = {
+        ...step1Check.errors,
+        ...step2Check.errors,
+      };
+
+      if (Object.keys(combinedErrors).length > 0) {
+        if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+        res.status(400).json({
+          message: Object.values(combinedErrors)[0],
+          errors: combinedErrors,
+        });
+        return;
+      }
+
+      const dupErrors = findDuplicateApplicationFields(
+        contactNumberRaw,
+        email,
+        storeName,
+        record.id,
+        record.franchisee_id,
+        record.user_id
+      );
+
+      if (Object.keys(dupErrors).length > 0) {
+        if (req.file) deleteUploadedFile(`/uploads/stores/${req.file.filename}`);
+        res.status(409).json({
+          message: Object.values(dupErrors)[0],
+          errors: dupErrors,
+        });
+        return;
+      }
+
+      const normalizedContact = normalizePhMobileNumber(contactNumberRaw);
+      const completeName = composeApplicantFullName(firstName, middleName, lastName);
+      const fullAddress = composeStoreFullAddress(street, barangay, cityMunicipality, province);
+
+      let storePhotoUrl: string | null = record.store_photo_url;
+      if (body.remove_store_photo === 'true') {
+        deleteUploadedFile(record.store_photo_url);
+        storePhotoUrl = null;
+      }
+      if (req.file) {
+        deleteUploadedFile(record.store_photo_url);
+        storePhotoUrl = `/uploads/stores/${req.file.filename}`;
+      }
+
+      const tx = db.transaction(() => {
+        if (initialPassword) {
+          const hash = bcrypt.hashSync(initialPassword, 10);
+          db.prepare(
+            "UPDATE users SET full_name = ?, email = ?, contact_number = ?, password_hash = ?, updated_at = datetime('now') WHERE id = ?"
+          ).run(completeName, email, normalizedContact, hash, record.user_id);
+        } else {
+          db.prepare(
+            "UPDATE users SET full_name = ?, email = ?, contact_number = ?, updated_at = datetime('now') WHERE id = ?"
+          ).run(completeName, email, normalizedContact, record.user_id);
+        }
+
+        db.prepare(
+          `UPDATE franchisees
+           SET owner_name = ?, store_name = ?, address = ?, contact_number = ?, lat = ?, lng = ?
+           WHERE id = ?`
+        ).run(
+          completeName,
+          storeName,
+          fullAddress,
+          normalizedContact,
+          lat,
+          lng,
+          record.franchisee_id
+        );
+
+        db.prepare(
+          `UPDATE franchisee_applications
+           SET date_applied = ?, first_name = ?, middle_name = ?, last_name = ?, complete_name = ?,
+               contact_number = ?, store_name = ?, street = ?, barangay = ?, city_municipality = ?,
+               province = ?, full_address = ?, landmark = ?, facebook_account = ?, email = ?,
+               remarks = ?, lat = ?, lng = ?, store_photo_url = ?, updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(
+          dateApplied,
+          firstName,
+          middleName,
+          lastName,
+          completeName,
+          normalizedContact,
+          storeName,
+          street,
+          barangay,
+          cityMunicipality,
+          province,
+          fullAddress,
+          landmark,
+          facebookAccount,
+          email,
+          remarks,
+          lat,
+          lng,
+          storePhotoUrl,
+          record.id
+        );
+
+        if (body.sales_agent_signature) {
+          upsertSignatureRow(
+            record.id,
+            'sales_agent',
+            req.user!.full_name,
+            body.sales_agent_signature,
+            req.user!.id
+          );
+        }
+
+        logActivity(
+          req.user!.id,
+          'FRANCHISEE_APPLICATION_UPDATED',
+          'franchisee',
+          record.franchisee_id,
+          `Updated application ${record.application_no} for ${storeName}`
+        );
+      });
+
+      tx();
+      const updated = getHydratedApplicationBy('fa.id', record.id);
+      res.json({
+        message: `Application ${record.application_no} updated successfully.`,
+        application: updated,
+      });
+    }
+  );
+
+  // Admin review: Approve or Reject application (with optional immediate delivery assignment & Noted By signature)
+  const handleAdminReviewApplication = (req: Request, res: Response) => {
+    const record = resolveApplicationByParamId(Number(req.params.id));
+    if (!record) {
+      res.status(404).json({ message: 'Franchisee application not found.' });
+      return;
     }
 
-    const totalRow = db
-      .prepare(`SELECT COUNT(*) AS total FROM franchisees f JOIN users u ON u.id = f.user_id ${where}`)
-      .get(...params) as { total: number };
+    const {
+      decision,
+      rejection_reason,
+      assigned_delivery_user_id,
+      cashier_name,
+      collector_name,
+      collector_signature,
+      noted_by_name,
+      noted_by_signature,
+      freezer_no,
+    } = req.body || {};
 
-    const rows = db
-      .prepare(
-        `SELECT f.*, u.username, u.email, u.is_active, au.full_name AS agent_name, au.username AS agent_username
-         FROM franchisees f
-         JOIN users u ON u.id = f.user_id
-         JOIN agents a ON a.id = f.agent_id
-         JOIN users au ON au.id = a.user_id
-         ${where}
-         ORDER BY f.id DESC LIMIT ? OFFSET ?`
-      )
-      .all(...params, limit, offset);
-
-    res.json({
-      data: rows,
-      pagination: {
-        page,
-        limit,
-        total: totalRow.total,
-        totalPages: Math.ceil(totalRow.total / limit) || 1,
-      },
-    });
-  });
-
-  api.post('/admin/franchisees/:id/review', authorize('admin'), requireWarehouse, (req, res) => {
-    const { id } = req.params;
-    const { decision, rejection_reason } = req.body;
     if (!['Approved', 'Rejected'].includes(decision)) {
       res.status(400).json({ message: 'Decision must be Approved or Rejected.' });
       return;
     }
     if (decision === 'Rejected' && (!rejection_reason || !String(rejection_reason).trim())) {
-      res.status(400).json({ message: 'Please provide a rejection reason when rejecting a franchisee.' });
+      res.status(400).json({
+        message: 'Please provide a rejection reason when rejecting a franchisee application.',
+      });
+      return;
+    }
+    if (record.status !== 'Pending Admin Review') {
+      res.status(400).json({
+        message: `Application ${record.application_no} is already "${record.status}".`,
+      });
       return;
     }
 
-    const fr = db
-      .prepare(
-        `SELECT f.*, a.user_id AS agent_user_id
-         FROM franchisees f
-         JOIN agents a ON a.id = f.agent_id
-         WHERE f.id = ?`
-      )
-      .get(Number(id)) as any;
+    const agRow = db
+      .prepare('SELECT user_id FROM agents WHERE id = ?')
+      .get(record.agent_id) as { user_id: number } | undefined;
 
-    if (!fr) {
-      res.status(404).json({ message: 'Franchisee not found.' });
-      return;
-    }
-    if (fr.status !== 'Pending') {
-      res.status(400).json({ message: `Franchisee is already ${fr.status}.` });
-      return;
-    }
+    const riderId =
+      decision === 'Approved' && assigned_delivery_user_id ? Number(assigned_delivery_user_id) : null;
+    const nextAppStatus =
+      decision === 'Rejected'
+        ? 'Rejected'
+        : riderId
+        ? 'For Delivery'
+        : 'Approved';
 
-    db.prepare(
-      "UPDATE franchisees SET status = ?, rejection_reason = ?, approved_by = ?, approved_at = datetime('now') WHERE id = ?"
-    ).run(
-      decision,
-      decision === 'Rejected' ? String(rejection_reason).trim() : null,
-      req.user!.id,
-      Number(id)
-    );
+    const cleanNotedBy = String(noted_by_name || req.user!.full_name || '').trim();
+    const cleanCashier = String(cashier_name ?? record.cashier_name ?? '').trim();
+    const cleanCollector = String(collector_name ?? record.collector_name ?? '').trim();
+    const cleanFreezerNo = String(freezer_no ?? record.freezer_no ?? '').trim();
 
-    notifyUser(
-      fr.agent_user_id,
-      `Franchisee ${decision}`,
-      decision === 'Approved'
-        ? `Your recruit "${fr.store_name}" has been Approved by Admin and can now log in.`
-        : `Your recruit "${fr.store_name}" was Rejected. Reason: ${String(rejection_reason).trim()}`,
-      'approval',
-      fr.id
-    );
-
-    if (decision === 'Approved') {
-      notifyUser(
-        fr.user_id,
-        'Franchisee Account Approved',
-        `Welcome to AICE Franchisee Hub! Your store "${fr.store_name}" is now approved.`,
-        'approval',
-        fr.id
+    const tx = db.transaction(() => {
+      db.prepare(
+        `UPDATE franchisees
+         SET status = ?, rejection_reason = ?, approved_by = ?, approved_at = datetime('now')
+         WHERE id = ?`
+      ).run(
+        decision === 'Rejected' ? 'Rejected' : 'Approved',
+        decision === 'Rejected' ? String(rejection_reason).trim() : null,
+        req.user!.id,
+        record.franchisee_id
       );
+
+      db.prepare(
+        `UPDATE franchisee_applications
+         SET status = ?,
+             rejection_reason = ?,
+             approved_by = ?,
+             approved_at = datetime('now'),
+             assigned_delivery_user_id = COALESCE(?, assigned_delivery_user_id),
+             assigned_at = CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE assigned_at END,
+             cashier_name = ?,
+             collector_name = ?,
+             noted_by_name = ?,
+             freezer_no = ?,
+             updated_at = datetime('now')
+         WHERE id = ?`
+      ).run(
+        nextAppStatus,
+        decision === 'Rejected' ? String(rejection_reason).trim() : null,
+        req.user!.id,
+        riderId,
+        riderId,
+        cleanCashier,
+        cleanCollector,
+        cleanNotedBy,
+        cleanFreezerNo,
+        record.id
+      );
+
+      if (cleanFreezerNo) {
+        db.prepare(
+          `UPDATE franchisee_equipment
+           SET freezer_no = ?
+           WHERE application_id = ? AND item = 'Freezer'`
+        ).run(cleanFreezerNo, record.id);
+      }
+
+      if (decision === 'Approved') {
+        upsertSignatureRow(
+          record.id,
+          'noted_by',
+          cleanNotedBy,
+          noted_by_signature || null,
+          req.user!.id
+        );
+      }
+
+      if (cleanCollector || collector_signature) {
+        upsertSignatureRow(
+          record.id,
+          'collector',
+          cleanCollector,
+          collector_signature || null,
+          req.user!.id
+        );
+      }
+
+      if (agRow?.user_id) {
+        notifyUser(
+          agRow.user_id,
+          `Application ${record.application_no} ${nextAppStatus}`,
+          decision === 'Approved'
+            ? `Your recruit "${record.store_name}" (${record.application_no}) has been Approved by Admin${
+                riderId ? ' and scheduled For Delivery' : ''
+              }.`
+            : `Your recruit "${record.store_name}" (${record.application_no}) was Rejected. Reason: ${String(
+                rejection_reason
+              ).trim()}`,
+          'approval',
+          record.id
+        );
+      }
+
+      if (decision === 'Approved') {
+        notifyUser(
+          record.user_id,
+          `Franchisee Application ${record.application_no} Approved`,
+          `Welcome to AICE Franchisee Hub! Your store "${record.store_name}" is now Approved. ${
+            riderId
+              ? 'A delivery team has been assigned to deliver your freezer and equipment.'
+              : 'Your freezer and equipment delivery will be scheduled shortly.'
+          }`,
+          'approval',
+          record.id
+        );
+      }
+
+      if (riderId) {
+        notifyUser(
+          riderId,
+          `New Equipment Delivery Assigned (${record.application_no})`,
+          `Admin assigned you to deliver the freezer & equipment kit to "${record.store_name}" (${record.full_address}). Please complete the Equipment Checklist and on-site signatures upon delivery.`,
+          'delivery',
+          record.id
+        );
+      }
+
+      logActivity(
+        req.user!.id,
+        `FRANCHISEE_${String(decision).toUpperCase()}`,
+        'franchisee',
+        record.franchisee_id,
+        `${record.application_no} (${record.store_name}) -> ${nextAppStatus}`
+      );
+    });
+
+    tx();
+    const updated = getHydratedApplicationBy('fa.id', record.id);
+    res.json({
+      message: `Application ${record.application_no} marked as ${nextAppStatus}.`,
+      application: updated,
+    });
+  };
+
+  api.post(
+    '/franchisee-applications/:id/review',
+    authorize('admin'),
+    requireWarehouse,
+    handleAdminReviewApplication
+  );
+
+  api.post(
+    '/admin/franchisees/:id/review',
+    authorize('admin'),
+    requireWarehouse,
+    handleAdminReviewApplication
+  );
+
+  // Admin assigns Delivery Staff for equipment delivery (transitions Approved -> For Delivery) & updates Cashier/Collector/Noted By
+  api.post(
+    '/franchisee-applications/:id/assign-delivery',
+    authorize('admin'),
+    requireWarehouse,
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
+
+      if (record.status === 'Pending Admin Review' || record.status === 'Rejected') {
+        res.status(400).json({
+          message: 'Application must be Approved before assigning equipment delivery staff.',
+        });
+        return;
+      }
+
+      const {
+        assigned_delivery_user_id,
+        cashier_name,
+        collector_name,
+        collector_signature,
+        noted_by_name,
+        noted_by_signature,
+        freezer_no,
+      } = req.body || {};
+
+      if (!assigned_delivery_user_id) {
+        res.status(400).json({ message: 'Please select a Delivery Staff rider.' });
+        return;
+      }
+
+      const rider = db
+        .prepare(
+          `SELECT u.id, u.full_name
+           FROM users u
+           JOIN roles r ON r.id = u.role_id
+           WHERE u.id = ? AND r.name = 'delivery' AND u.is_active = 1`
+        )
+        .get(Number(assigned_delivery_user_id)) as { id: number; full_name: string } | undefined;
+
+      if (!rider) {
+        res.status(404).json({ message: 'Selected Delivery Staff rider not found or inactive.' });
+        return;
+      }
+
+      const nextStatus =
+        record.status === 'Approved' ? 'For Delivery' : record.status;
+      const cleanCashier = String(cashier_name ?? record.cashier_name ?? '').trim();
+      const cleanCollector = String(collector_name ?? record.collector_name ?? '').trim();
+      const cleanNotedBy = String(noted_by_name || record.noted_by_name || req.user!.full_name).trim();
+      const cleanFreezerNo = String(freezer_no ?? record.freezer_no ?? '').trim();
+
+      const tx = db.transaction(() => {
+        db.prepare(
+          `UPDATE franchisee_applications
+           SET assigned_delivery_user_id = ?,
+               assigned_at = datetime('now'),
+               status = ?,
+               cashier_name = ?,
+               collector_name = ?,
+               noted_by_name = ?,
+               freezer_no = ?,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(
+          rider.id,
+          nextStatus,
+          cleanCashier,
+          cleanCollector,
+          cleanNotedBy,
+          cleanFreezerNo,
+          record.id
+        );
+
+        if (cleanFreezerNo) {
+          db.prepare(
+            `UPDATE franchisee_equipment
+             SET freezer_no = ?
+             WHERE application_id = ? AND item = 'Freezer'`
+          ).run(cleanFreezerNo, record.id);
+        }
+
+        if (cleanNotedBy || noted_by_signature) {
+          upsertSignatureRow(
+            record.id,
+            'noted_by',
+            cleanNotedBy,
+            noted_by_signature || null,
+            req.user!.id
+          );
+        }
+
+        if (cleanCollector || collector_signature) {
+          upsertSignatureRow(
+            record.id,
+            'collector',
+            cleanCollector,
+            collector_signature || null,
+            req.user!.id
+          );
+        }
+
+        notifyUser(
+          rider.id,
+          `New Equipment Delivery Assigned (${record.application_no})`,
+          `You have been assigned to deliver the freezer & equipment kit to "${record.store_name}" (${record.full_address}). Landmark: ${record.landmark}. Contact: ${record.contact_number}.`,
+          'delivery',
+          record.id
+        );
+
+        notifyUser(
+          record.user_id,
+          `Equipment Delivery Scheduled (${record.application_no})`,
+          `Delivery rider ${rider.full_name} has been assigned to deliver your AICE freezer and starter equipment kit to "${record.store_name}".`,
+          'delivery',
+          record.id
+        );
+
+        logActivity(
+          req.user!.id,
+          'EQUIPMENT_DELIVERY_ASSIGNED',
+          'franchisee',
+          record.franchisee_id,
+          `Assigned rider ${rider.full_name} to ${record.application_no} (${nextStatus})`
+        );
+      });
+
+      tx();
+      const updated = getHydratedApplicationBy('fa.id', record.id);
+      res.json({
+        message: `Assigned ${rider.full_name} for equipment delivery (${record.application_no}).`,
+        application: updated,
+      });
     }
+  );
 
-    logActivity(
-      req.user!.id,
-      `FRANCHISEE_${String(decision).toUpperCase()}`,
-      'franchisee',
-      fr.id,
-      `${decision} ${fr.store_name}`
-    );
+  // Admin sign-off / Cashier / Collector / Noted By update
+  api.post(
+    '/franchisee-applications/:id/admin-signoff',
+    authorize('admin'),
+    requireWarehouse,
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
 
-    res.json({ message: `Franchisee ${String(decision).toLowerCase()} successfully.` });
-  });
+      const {
+        cashier_name,
+        collector_name,
+        collector_signature,
+        noted_by_name,
+        noted_by_signature,
+        freezer_no,
+        status,
+      } = req.body || {};
+
+      const cleanCashier = String(cashier_name ?? record.cashier_name ?? '').trim();
+      const cleanCollector = String(collector_name ?? record.collector_name ?? '').trim();
+      const cleanNotedBy = String(noted_by_name ?? record.noted_by_name ?? req.user!.full_name).trim();
+      const cleanFreezerNo = String(freezer_no ?? record.freezer_no ?? '').trim();
+      const nextStatus =
+        status && ['Approved', 'For Delivery', 'Delivered', 'Active'].includes(status)
+          ? status
+          : record.status;
+
+      const tx = db.transaction(() => {
+        db.prepare(
+          `UPDATE franchisee_applications
+           SET cashier_name = ?,
+               collector_name = ?,
+               noted_by_name = ?,
+               freezer_no = ?,
+               status = ?,
+               activated_at = CASE WHEN ? = 'Active' THEN COALESCE(activated_at, datetime('now')) ELSE activated_at END,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(
+          cleanCashier,
+          cleanCollector,
+          cleanNotedBy,
+          cleanFreezerNo,
+          nextStatus,
+          nextStatus,
+          record.id
+        );
+
+        if (cleanFreezerNo) {
+          db.prepare(
+            `UPDATE franchisee_equipment
+             SET freezer_no = ?
+             WHERE application_id = ? AND item = 'Freezer'`
+          ).run(cleanFreezerNo, record.id);
+        }
+
+        if (cleanNotedBy || noted_by_signature) {
+          upsertSignatureRow(
+            record.id,
+            'noted_by',
+            cleanNotedBy,
+            noted_by_signature || null,
+            req.user!.id
+          );
+        }
+
+        if (cleanCollector || collector_signature) {
+          upsertSignatureRow(
+            record.id,
+            'collector',
+            cleanCollector,
+            collector_signature || null,
+            req.user!.id
+          );
+        }
+
+        logActivity(
+          req.user!.id,
+          'FRANCHISEE_ADMIN_SIGNOFF',
+          'franchisee',
+          record.franchisee_id,
+          `Updated Admin/Cashier/Collector sign-offs on ${record.application_no} (${nextStatus})`
+        );
+      });
+
+      tx();
+      const updated = getHydratedApplicationBy('fa.id', record.id);
+      res.json({
+        message: `Sign-off details saved for ${record.application_no}.`,
+        application: updated,
+      });
+    }
+  );
+
+  // Delivery Staff (or Admin) completes Section 2 (Equipment Checklist) and Section 3 (On-Site Signatures)
+  api.post(
+    '/franchisee-applications/:id/equipment-delivery',
+    authorize('delivery', 'admin'),
+    requireWarehouse,
+    (req, res) => {
+      const record = resolveApplicationByParamId(Number(req.params.id));
+      if (!record) {
+        res.status(404).json({ message: 'Franchisee application not found.' });
+        return;
+      }
+
+      if (
+        req.user!.role === 'delivery' &&
+        record.assigned_delivery_user_id &&
+        record.assigned_delivery_user_id !== req.user!.id
+      ) {
+        res.status(403).json({
+          message: 'This equipment delivery is assigned to another delivery staff member.',
+        });
+        return;
+      }
+
+      if (record.status === 'Pending Admin Review' || record.status === 'Rejected') {
+        res.status(400).json({
+          message: 'Cannot record equipment delivery for an unapproved application.',
+        });
+        return;
+      }
+
+      const body = req.body || {};
+      const todayStr = (db.prepare("SELECT date('now') AS d").get() as { d: string }).d;
+      const dateDelivered = String(body.date_delivered || record.date_delivered || todayStr)
+        .trim()
+        .slice(0, 10);
+
+      const incomingEq: any[] = Array.isArray(body.equipment) ? body.equipment : [];
+      const eqByName: Record<
+        string,
+        { item_condition: 'NEW' | 'OLD' | 'NOT_ISSUED'; quantity: number; freezer_no: string }
+      > = {};
+
+      for (const itemName of FRANCHISEE_EQUIPMENT_ITEMS) {
+        const match = incomingEq.find(
+          (e) => e && (e.item_name === itemName || e.item === itemName)
+        );
+        const condRaw = String(
+          match?.item_condition || match?.condition_status || match?.condition || 'NOT_ISSUED'
+        ).toUpperCase();
+        const cond: 'NEW' | 'OLD' | 'NOT_ISSUED' =
+          condRaw === 'NEW' ? 'NEW' : condRaw === 'OLD' ? 'OLD' : 'NOT_ISSUED';
+        const qty =
+          cond === 'NOT_ISSUED'
+            ? 0
+            : Math.max(1, parseInt(String(match?.quantity ?? '1'), 10) || 1);
+        const fNo =
+          itemName === 'Freezer'
+            ? String(body.freezer_no ?? match?.freezer_no ?? record.freezer_no ?? '').trim()
+            : '';
+        eqByName[itemName] = {
+          item_condition: cond,
+          quantity: qty,
+          freezer_no: fNo,
+        };
+      }
+
+      const issuedItemsCount = Object.values(eqByName).filter(
+        (e) => e.item_condition === 'NEW' || e.item_condition === 'OLD'
+      ).length;
+
+      if (issuedItemsCount === 0) {
+        res.status(400).json({
+          message: 'Please check at least one equipment item as NEW or OLD in Section 2.',
+        });
+        return;
+      }
+
+      const freezerEntry = eqByName['Freezer'];
+      if (
+        (freezerEntry.item_condition === 'NEW' || freezerEntry.item_condition === 'OLD') &&
+        !freezerEntry.freezer_no
+      ) {
+        res.status(400).json({
+          message: 'Freezer # (serial or asset number) is required when issuing a Freezer.',
+        });
+        return;
+      }
+
+      const customerPrintedName = String(
+        body.customer_printed_name ||
+          record.signatures?.customer?.printed_name ||
+          record.complete_name ||
+          ''
+      ).trim();
+      const customerSignature =
+        body.customer_signature ||
+        body.customer_signature_data ||
+        record.signatures?.customer?.signature_image ||
+        null;
+
+      const deliveryTeamPrintedName = String(
+        body.delivery_team_printed_name ||
+          record.signatures?.delivery_team?.printed_name ||
+          `${req.user!.full_name} Team`
+      ).trim();
+      const deliveryTeamSignature =
+        body.delivery_team_signature ||
+        body.delivery_team_signature_data ||
+        record.signatures?.delivery_team?.signature_image ||
+        null;
+
+      const driverPrintedName = String(
+        body.driver_printed_name ||
+          record.signatures?.driver?.printed_name ||
+          req.user!.full_name ||
+          ''
+      ).trim();
+      const driverSignature =
+        body.driver_signature ||
+        body.driver_signature_data ||
+        record.signatures?.driver?.signature_image ||
+        null;
+
+      if (!customerPrintedName || !customerSignature) {
+        res.status(400).json({
+          message: 'Customer printed name and on-site signature are required to complete equipment handover.',
+        });
+        return;
+      }
+      if (!deliveryTeamPrintedName || !deliveryTeamSignature) {
+        res.status(400).json({
+          message: 'Delivery Team printed name and signature are required.',
+        });
+        return;
+      }
+      if (!driverPrintedName || !driverSignature) {
+        res.status(400).json({
+          message: 'Driver printed name and signature are required.',
+        });
+        return;
+      }
+
+      const collectorPrintedName = String(
+        body.collector_printed_name ??
+          body.collector_name ??
+          record.collector_name ??
+          record.signatures?.collector?.printed_name ??
+          ''
+      ).trim();
+      const collectorSignature =
+        body.collector_signature ||
+        body.collector_signature_data ||
+        record.signatures?.collector?.signature_image ||
+        null;
+
+      const cleanCashier = String(body.cashier_name ?? record.cashier_name ?? '').trim();
+      const targetStatus = body.status === 'Delivered' ? 'Delivered' : 'Active';
+
+      const agRow = db
+        .prepare('SELECT user_id FROM agents WHERE id = ?')
+        .get(record.agent_id) as { user_id: number } | undefined;
+
+      const tx = db.transaction(() => {
+        const upEq = db.prepare(
+          `INSERT INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no, updated_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(application_id, item) DO UPDATE SET
+             condition = excluded.condition,
+             quantity = excluded.quantity,
+             freezer_no = excluded.freezer_no,
+             updated_at = datetime('now')`
+        );
+
+        for (const itemName of FRANCHISEE_EQUIPMENT_ITEMS) {
+          const entry = eqByName[itemName];
+          upEq.run(
+            record.id,
+            itemName,
+            entry.item_condition,
+            entry.quantity,
+            entry.freezer_no
+          );
+        }
+
+        upsertSignatureRow(
+          record.id,
+          'customer',
+          customerPrintedName,
+          customerSignature,
+          record.user_id
+        );
+        upsertSignatureRow(
+          record.id,
+          'delivery_team',
+          deliveryTeamPrintedName,
+          deliveryTeamSignature,
+          req.user!.id
+        );
+        upsertSignatureRow(
+          record.id,
+          'driver',
+          driverPrintedName,
+          driverSignature,
+          req.user!.id
+        );
+
+        if (collectorPrintedName || collectorSignature) {
+          upsertSignatureRow(
+            record.id,
+            'collector',
+            collectorPrintedName,
+            collectorSignature,
+            req.user!.id
+          );
+        }
+
+        db.prepare(
+          `UPDATE franchisee_applications
+           SET freezer_no = ?,
+               date_delivered = ?,
+               delivered_at = COALESCE(delivered_at, datetime('now')),
+               activated_at = CASE WHEN ? = 'Active' THEN COALESCE(activated_at, datetime('now')) ELSE activated_at END,
+               assigned_delivery_user_id = COALESCE(assigned_delivery_user_id, ?),
+               cashier_name = ?,
+               collector_name = CASE WHEN ? != '' THEN ? ELSE collector_name END,
+               status = ?,
+               updated_at = datetime('now')
+           WHERE id = ?`
+        ).run(
+          freezerEntry.freezer_no,
+          dateDelivered,
+          targetStatus,
+          req.user!.role === 'delivery' ? req.user!.id : record.assigned_delivery_user_id,
+          cleanCashier,
+          collectorPrintedName,
+          collectorPrintedName,
+          targetStatus,
+          record.id
+        );
+
+        notifyAdmins(
+          `Equipment Delivered & Signed (${record.application_no})`,
+          `${req.user!.full_name} completed the equipment checklist (Freezer #${
+            freezerEntry.freezer_no || 'N/A'
+          }) and customer sign-off for "${record.store_name}". Franchisee is now ${targetStatus}.`,
+          'delivery',
+          record.id
+        );
+
+        if (agRow?.user_id) {
+          notifyUser(
+            agRow.user_id,
+            `Recruit Activated (${record.application_no})`,
+            `Equipment delivery and signatures for "${record.store_name}" are complete. Store status is now ${targetStatus}.`,
+            'approval',
+            record.id
+          );
+        }
+
+        notifyUser(
+          record.user_id,
+          `Equipment Handover Complete — Store ${targetStatus}!`,
+          `Your AICE freezer (${
+            freezerEntry.freezer_no || 'Issued'
+          }) and equipment checklist have been signed off. You can now place online stock replenishment orders!`,
+          'approval',
+          record.id
+        );
+
+        logActivity(
+          req.user!.id,
+          'FRANCHISEE_EQUIPMENT_DELIVERED',
+          'franchisee',
+          record.franchisee_id,
+          `Completed equipment checklist & signatures for ${record.application_no} -> ${targetStatus}`
+        );
+      });
+
+      tx();
+      const updated = getHydratedApplicationBy('fa.id', record.id);
+      res.json({
+        message: `Equipment checklist and signatures saved! "${record.store_name}" is now ${targetStatus}.`,
+        application: updated,
+        data: updated,
+      });
+    }
+  );
 
   // ===== COMMISSIONS =====
   api.get('/commissions', authorize('admin', 'agent'), requireWarehouse, (req, res) => {
@@ -3644,6 +5145,18 @@ async function startServer() {
 
   // ===== ORDERS (Franchisee & Admin — With Server-Side Promo Calculation & Stock Deduction) =====
   api.post('/orders', authorize('franchisee'), requireWarehouse, (req, res) => {
+    const appRow = db
+      .prepare('SELECT status, application_no FROM franchisee_applications WHERE user_id = ?')
+      .get(req.user!.id) as { status: string; application_no: string } | undefined;
+    const effectiveAppStatus = appRow ? normalizeApplicationStatus(appRow.status) : 'Active';
+    if (!canFranchiseeOrderReplenishment(effectiveAppStatus)) {
+      res.status(403).json({
+        message: `Replenishment stock ordering is locked until your initial freezer & equipment delivery checklist and on-site signatures are completed (current status: ${effectiveAppStatus}).`,
+        application_status: effectiveAppStatus,
+      });
+      return;
+    }
+
     const { warehouse_id, requested_delivery_datetime, notes, items } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
       res.status(400).json({ message: 'Order must contain at least one item.' });

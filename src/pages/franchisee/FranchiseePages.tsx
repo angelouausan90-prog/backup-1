@@ -3,6 +3,12 @@ import L from 'leaflet';
 import { api } from '../../services/api';
 import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
 import { ORDER_TIMELINE_STEPS, getTimelineStepIndex } from '../../utils/domainRules';
+import {
+  ApplicationStatusBadge,
+  ApplicationWorkflowTimeline,
+  FranchiseePaperFormModal,
+  downloadApplicationPdf,
+} from '../../components/FranchiseePaperFormModal';
 import { User } from '../../types';
 
 // ===== 1. FRANCHISEE DASHBOARD =====
@@ -13,12 +19,18 @@ export const FranchiseeDashboard: React.FC<{
 }> = ({ user, onNavigate, onTrackOrder }) => {
   const [orders, setOrders] = useState<any[]>([]);
   const [activePromos, setActivePromos] = useState<any[]>([]);
+  const [myApplication, setMyApplication] = useState<any | null>(null);
+  const [showPaperForm, setShowPaperForm] = useState(false);
 
   useEffect(() => {
     api.get('/orders?limit=8').then((res) => setOrders(res.data));
     api
       .get('/promos')
       .then((res) => setActivePromos(res.data || []))
+      .catch(() => {});
+    api
+      .get('/franchisee-applications/my')
+      .then((res) => setMyApplication(res.data || null))
       .catch(() => {});
   }, []);
 
@@ -45,6 +57,77 @@ export const FranchiseeDashboard: React.FC<{
           Order Ice Cream Stock
         </button>
       </div>
+
+      {/* OFFICIAL NEW FRANCHISEE FORM & EQUIPMENT HANDOVER RECORD */}
+      {myApplication && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-800">
+                  AICE COTABATO-JCDL CORPORATION · NEW FRANCHISEE FORM
+                </span>
+                <span className="font-mono text-xs font-bold text-slate-900">
+                  ({myApplication.application_no})
+                </span>
+                <ApplicationStatusBadge status={myApplication.status} />
+              </div>
+              <h2 className="text-base font-bold text-slate-900 mt-1">
+                My Official Registration & Equipment Handover Record
+              </h2>
+              <p className="text-xs text-slate-600">
+                Date Applied: <strong className="font-mono">{myApplication.date_applied}</strong> ·
+                Sales Agent: <strong>{myApplication.agent_name}</strong> · Freezer #:{' '}
+                <strong className="font-mono text-slate-900">
+                  {myApplication.freezer_no || 'Pending Delivery Handover'}
+                </strong>{' '}
+                · Date Delivered:{' '}
+                <strong className="font-mono">
+                  {myApplication.date_delivered || 'Pending'}
+                </strong>
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPaperForm(true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800"
+              >
+                View Official Paper Form / Print
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadApplicationPdf(myApplication)}
+                className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800"
+              >
+                Download PDF
+              </button>
+            </div>
+          </div>
+
+          <ApplicationWorkflowTimeline status={myApplication.status} />
+
+          {!myApplication.can_order_replenishment && (
+            <div className="p-3.5 rounded-lg border border-amber-300 bg-amber-50 text-xs text-amber-950">
+              <strong>Initial Freezer & Equipment Delivery Pending:</strong> Your franchisee account is approved, and online stock-replenishment ordering will unlock automatically as soon as our Delivery Staff delivers your AICE freezer & accessories and completes Section 2 (Equipment Checklist) and Section 3 (On-Site Signatures).
+              {myApplication.assigned_delivery_staff_name && (
+                <span className="block mt-1">
+                  Assigned Equipment Delivery Staff:{' '}
+                  <strong>{myApplication.assigned_delivery_staff_name}</strong> (
+                  {myApplication.assigned_delivery_staff_contact || '—'})
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showPaperForm && myApplication && (
+        <FranchiseePaperFormModal
+          application={myApplication}
+          onClose={() => setShowPaperForm(false)}
+        />
+      )}
 
       {/* ACTIVE PROMOTIONS BANNER / SECTION */}
       <div className="bg-white border border-emerald-200 rounded-lg p-5 space-y-3">
@@ -198,7 +281,7 @@ export const FranchiseeDashboard: React.FC<{
   );
 };
 
-// ===== 2. FRANCHISEE PRODUCT CATALOG & CART =====
+// ===== 2. FRANCHISEE PRODUCT CATALOG & CART (REPLENISHMENT ORDERING PAGE) =====
 export const CatalogAndCartView: React.FC<{
   onTrackOrder: (orderId: number) => void;
 }> = ({ onTrackOrder }) => {
@@ -207,6 +290,11 @@ export const CatalogAndCartView: React.FC<{
   const [categories, setCategories] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
   const [activePromos, setActivePromos] = useState<any[]>([]);
+  const [recentOrders, setRecentOrders] = useState<any[]>([]);
+  const [myApplication, setMyApplication] = useState<any | null>(null);
+  const [appLoading, setAppLoading] = useState<boolean>(true);
+  const [showPaperForm, setShowPaperForm] = useState(false);
+  const [orderTab, setOrderTab] = useState<'direct' | 'reorder'>('direct');
   const [search, setSearch] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [cart, setCart] = useState<Record<number, { product: any; quantity: number }>>({});
@@ -215,6 +303,7 @@ export const CatalogAndCartView: React.FC<{
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [reorderingId, setReorderingId] = useState<number | null>(null);
 
   useEffect(() => {
     api.get('/warehouses').then((res) => {
@@ -227,6 +316,15 @@ export const CatalogAndCartView: React.FC<{
       .get('/promos')
       .then((res) => setActivePromos(res.data || []))
       .catch(() => {});
+    api
+      .get('/orders?limit=6')
+      .then((res) => setRecentOrders(res.data || []))
+      .catch(() => {});
+    api
+      .get('/franchisee-applications/my')
+      .then((res) => setMyApplication(res.data || null))
+      .catch(() => {})
+      .finally(() => setAppLoading(false));
   }, []);
 
   useEffect(() => {
@@ -322,36 +420,228 @@ export const CatalogAndCartView: React.FC<{
     }
   };
 
+  const handleQuickReorder = async (order: any) => {
+    setError('');
+    setReorderingId(order.id);
+    try {
+      const paidItems = (order.items || []).filter((it: any) => !it.is_free_item);
+      const res = await api.post('/orders', {
+        warehouse_id: order.warehouse_id,
+        notes: `Reorder of ${order.order_number}`,
+        items: paidItems.map((it: any) => ({
+          product_id: it.product_id,
+          quantity: it.quantity,
+        })),
+      });
+      onTrackOrder(res.id);
+    } catch (err: any) {
+      setError(err.message || 'Could not reorder items.');
+    } finally {
+      setReorderingId(null);
+    }
+  };
+
+  // If the logged-in franchisee is not Active yet (e.g. Pending, Approved, or For Delivery), show "Your account is not active yet."
+  if (!appLoading && myApplication && !myApplication.can_order_replenishment) {
+    return (
+      <div className="space-y-6">
+        <div
+          role="alert"
+          data-testid="franchisee-not-active-yet-banner"
+          className="p-6 rounded-xl border-2 border-amber-300 bg-amber-50 space-y-3"
+        >
+          <div className="text-lg font-bold text-amber-950">
+            Your account is not active yet.
+          </div>
+          <p className="text-sm text-amber-900 max-w-2xl">
+            Your NEW FRANCHISEE FORM ({myApplication.application_no}) for{' '}
+            <strong>{myApplication.store_name}</strong> is currently in{' '}
+            <strong>{myApplication.status}</strong> status. Online stock-replenishment ordering unlocks automatically once our Delivery Staff completes your initial freezer &amp; equipment handover checklist and on-site signatures.
+          </p>
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowPaperForm(true)}
+              className="px-4 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800"
+            >
+              View My New Franchisee Form
+            </button>
+          </div>
+        </div>
+
+        {showPaperForm && (
+          <FranchiseePaperFormModal
+            application={myApplication}
+            onClose={() => setShowPaperForm(false)}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">AICE Stock-Replenishment Catalog</h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-bold text-slate-900">
+              AICE Stock-Replenishment Ordering
+            </h1>
+            {myApplication?.store_name && (
+              <span
+                data-testid="ordering-own-store-name"
+                className="text-xs font-mono font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md"
+              >
+                Store: {myApplication.store_name}
+              </span>
+            )}
+          </div>
           <p className="text-sm text-slate-600">
-            Browse available warehouse stock, add cartons to your cart, choose your preferred delivery schedule, and submit online.
+            Re-order from a previous delivery in one click or place a direct stock-replenishment order from live warehouse inventory.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor="cat-wh" className="text-xs font-semibold text-slate-700">
-            Origin Warehouse:
-          </label>
-          <select
-            id="cat-wh"
-            value={selectedWh}
-            onChange={(e) => {
-              setSelectedWh(e.target.value);
-              setCart({});
-            }}
-            className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm bg-white font-medium"
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Toggle between Direct Order and Re-order options */}
+          <div
+            role="tablist"
+            aria-label="Ordering Mode"
+            className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-1"
           >
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={orderTab === 'direct'}
+              data-testid="tab-direct-order"
+              onClick={() => setOrderTab('direct')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                orderTab === 'direct'
+                  ? 'bg-emerald-700 text-white shadow-sm'
+                  : 'text-slate-700 hover:text-slate-900'
+              }`}
+            >
+              Direct Order (Catalog)
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={orderTab === 'reorder'}
+              data-testid="tab-quick-reorder"
+              onClick={() => setOrderTab('reorder')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                orderTab === 'reorder'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'text-slate-700 hover:text-slate-900'
+              }`}
+            >
+              Re-order ({recentOrders.length})
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label htmlFor="cat-wh" className="text-xs font-semibold text-slate-700">
+              Origin Warehouse:
+            </label>
+            <select
+              id="cat-wh"
+              value={selectedWh}
+              onChange={(e) => {
+                setSelectedWh(e.target.value);
+                setCart({});
+              }}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm bg-white font-medium"
+            >
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
+
+      {/* Quick Re-order Panel (always accessible via Re-order tab or top card when past orders exist) */}
+      {(orderTab === 'reorder' || recentOrders.length > 0) && (
+        <div
+          data-testid="quick-reorder-section"
+          className="bg-white border border-emerald-200 rounded-xl p-4 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">
+                Quick Re-order from Your Previous Orders
+              </h2>
+              <p className="text-xs text-slate-600">
+                Repeat any previous stock replenishment order for your store in one tap.
+              </p>
+            </div>
+            {orderTab === 'reorder' && (
+              <button
+                type="button"
+                onClick={() => setOrderTab('direct')}
+                className="text-xs font-semibold text-emerald-800 hover:underline"
+              >
+                Switch to Direct Catalog Order →
+              </button>
+            )}
+          </div>
+
+          {recentOrders.length === 0 ? (
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600">
+              No previous orders found for your store yet. Use the Direct Order catalog below to place your first stock order.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {recentOrders.slice(0, orderTab === 'reorder' ? 6 : 3).map((ord) => {
+                const paidItems = (ord.items || []).filter((it: any) => !it.is_free_item);
+                return (
+                  <div
+                    key={ord.id}
+                    className="p-3.5 rounded-lg border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-2.5"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-bold text-slate-900">
+                          {ord.order_number}
+                        </span>
+                        <StatusText status={ord.status} />
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {ord.warehouse_name} · <span className="font-mono">{ord.created_at}</span>
+                      </div>
+                      <div className="text-xs text-slate-700 line-clamp-2">
+                        {paidItems
+                          .map((it: any) => `${it.quantity}x ${it.product_name}`)
+                          .join(', ') || 'Replenishment items'}
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t border-slate-200/80 flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-bold text-slate-900">
+                        PHP {Number(ord.total_amount).toFixed(2)}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={reorderingId === ord.id}
+                        onClick={() => handleQuickReorder(ord)}
+                        className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700 disabled:opacity-50"
+                      >
+                        {reorderingId === ord.id ? 'Re-ordering...' : 'Re-order Now'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showPaperForm && myApplication && (
+        <FranchiseePaperFormModal
+          application={myApplication}
+          onClose={() => setShowPaperForm(false)}
+        />
+      )}
 
       {activePromos.length > 0 && (
         <div className="p-3.5 rounded-lg border border-emerald-200 bg-emerald-50/70 space-y-1">
@@ -1196,8 +1486,17 @@ export const FranchiseeProfileView: React.FC<{
     newPassword: '',
     confirmPassword: '',
   });
+  const [myApplication, setMyApplication] = useState<any | null>(null);
+  const [showPaperForm, setShowPaperForm] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+
+  useEffect(() => {
+    api
+      .get('/franchisee-applications/my')
+      .then((res) => setMyApplication(res.data || null))
+      .catch(() => {});
+  }, []);
 
   const saveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1233,11 +1532,13 @@ export const FranchiseeProfileView: React.FC<{
   };
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 max-w-5xl">
       <div>
-        <h1 className="text-xl font-bold text-slate-900">Store Profile & Security</h1>
+        <h1 className="text-xl font-bold text-slate-900">
+          Store Profile, Official Registration Record & Security
+        </h1>
         <p className="text-sm text-slate-600">
-          Update your contact details or change your account password.
+          View or print your official AICE Cotabato-JCDL Corporation New Franchisee Form and equipment handover record, or update your contact details and password.
         </p>
       </div>
 
@@ -1250,6 +1551,69 @@ export const FranchiseeProfileView: React.FC<{
         <div className="p-4 rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-800">
           {err}
         </div>
+      )}
+
+      {myApplication && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-xs font-bold text-emerald-800">
+                  {myApplication.application_no}
+                </span>
+                <ApplicationStatusBadge status={myApplication.status} />
+              </div>
+              <h2 className="text-base font-bold text-slate-900 mt-1">
+                Official Registration & Equipment Record (Read-Only)
+              </h2>
+              <p className="text-xs text-slate-600">
+                Store: <strong>{myApplication.store_name}</strong> · Address:{' '}
+                <strong>{myApplication.full_address}</strong> · Landmark:{' '}
+                <strong>{myApplication.landmark || '—'}</strong> · Freezer #:{' '}
+                <strong className="font-mono">{myApplication.freezer_no || '—'}</strong>
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPaperForm(true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800"
+              >
+                Print / View Paper Form
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadApplicationPdf(myApplication)}
+                className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800"
+              >
+                Download PDF
+              </button>
+            </div>
+          </div>
+
+          <ApplicationWorkflowTimeline status={myApplication.status} />
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-2 border-t border-slate-100">
+            {(myApplication.equipment || []).map((eq: any) => (
+              <div
+                key={eq.item_name}
+                className="p-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs"
+              >
+                <div className="font-bold text-slate-900">{eq.item_name}</div>
+                <div className="font-mono text-[11px] text-slate-600 mt-0.5">
+                  {eq.condition_status} · Qty: {eq.quantity}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showPaperForm && myApplication && (
+        <FranchiseePaperFormModal
+          application={myApplication}
+          onClose={() => setShowPaperForm(false)}
+        />
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

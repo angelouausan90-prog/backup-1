@@ -10,6 +10,8 @@ import {
   getNotificationTypesForRoute,
   getSidebarBadgeCount,
   NotificationSummaryPayload,
+  sanitizeInternalRedirectPath,
+  resolveFranchiseeQrRouteAccess,
 } from './utils/domainRules';
 import {
   AdminDashboard,
@@ -114,6 +116,21 @@ function defaultRouteForRole(role: RoleName, hasWarehouse: boolean): string {
   }
 }
 
+function isQrOrderPath(pathname: string): boolean {
+  return (
+    pathname === '/franchisee/order' ||
+    pathname === '/qr' ||
+    pathname.startsWith('/qr/')
+  );
+}
+
+function getValidatedRedirectParam(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search || '');
+  const raw = params.get('redirect');
+  return sanitizeInternalRedirectPath(raw);
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [hasWarehouse, setHasWarehouse] = useState<boolean>(false);
@@ -122,6 +139,7 @@ export default function App() {
     const p = typeof window !== 'undefined' ? window.location.pathname : '/';
     return p === '/login' ? '/login' : p || '/';
   });
+  const [qrNoticeMessage, setQrNoticeMessage] = useState<string>('');
   const [trackingOrderId, setTrackingOrderId] = useState<number | null>(null);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [notificationSummary, setNotificationSummary] =
@@ -141,13 +159,18 @@ export default function App() {
   const [pwdError, setPwdError] = useState('');
   const [pwdBusy, setPwdBusy] = useState(false);
 
-  const syncRouteWithHistory = (nextPath: string, replace = false) => {
-    setRoute(nextPath);
-    if (typeof window !== 'undefined' && window.location.pathname !== nextPath) {
-      if (replace) {
-        window.history.replaceState({}, '', nextPath);
-      } else {
-        window.history.pushState({}, '', nextPath);
+  const syncRouteWithHistory = (nextUrl: string, replace = false) => {
+    const qIdx = nextUrl.indexOf('?');
+    const pathnameOnly = qIdx >= 0 ? nextUrl.slice(0, qIdx) : nextUrl;
+    setRoute(pathnameOnly || '/');
+    if (typeof window !== 'undefined') {
+      const currentFull = `${window.location.pathname}${window.location.search}`;
+      if (currentFull !== nextUrl) {
+        if (replace) {
+          window.history.replaceState({}, '', nextUrl);
+        } else {
+          window.history.pushState({}, '', nextUrl);
+        }
       }
     }
   };
@@ -190,6 +213,43 @@ export default function App() {
       .catch(() => loadUnreadCount());
   };
 
+  const resolveDestinationAfterAuth = (
+    u: User,
+    wh: boolean,
+    requestedPath: string,
+    redirectQueryPath: string | null
+  ): string => {
+    const candidatePath = redirectQueryPath || requestedPath;
+
+    if (isQrOrderPath(candidatePath)) {
+      const qrRes = resolveFranchiseeQrRouteAccess(u, wh);
+      if (qrRes.message && qrRes.action === 'redirect_role_dashboard') {
+        setQrNoticeMessage(qrRes.message);
+      } else {
+        setQrNoticeMessage('');
+      }
+      return qrRes.targetPath;
+    }
+
+    if (
+      redirectQueryPath &&
+      redirectQueryPath.startsWith(`/${u.role}`)
+    ) {
+      return redirectQueryPath;
+    }
+
+    if (
+      requestedPath === '/' ||
+      requestedPath === '/login' ||
+      requestedPath === '/change-password' ||
+      !requestedPath.startsWith(`/${u.role}`)
+    ) {
+      return defaultRouteForRole(u.role, wh);
+    }
+
+    return requestedPath;
+  };
+
   const refreshSession = async () => {
     const token = localStorage.getItem('aice_token');
     if (!token) {
@@ -204,7 +264,19 @@ export default function App() {
       setUnreadCount(0);
       const currentPath =
         typeof window !== 'undefined' ? window.location.pathname : '/';
-      syncRouteWithHistory(currentPath === '/login' ? '/login' : '/', true);
+      if (isQrOrderPath(currentPath)) {
+        syncRouteWithHistory('/login?redirect=/franchisee/order', true);
+      } else if (currentPath === '/login') {
+        const validRedirect = getValidatedRedirectParam();
+        syncRouteWithHistory(
+          validRedirect
+            ? `/login?redirect=${encodeURIComponent(validRedirect)}`
+            : '/login',
+          true
+        );
+      } else {
+        syncRouteWithHistory('/', true);
+      }
       setLoading(false);
       return;
     }
@@ -220,13 +292,13 @@ export default function App() {
       } else {
         const currentPath =
           typeof window !== 'undefined' ? window.location.pathname : route;
-        const nextRoute =
-          currentPath === '/' ||
-          currentPath === '/login' ||
-          currentPath === '/change-password' ||
-          !currentPath.startsWith(`/${u.role}`)
-            ? defaultRouteForRole(u.role, wh)
-            : currentPath;
+        const redirectParam = getValidatedRedirectParam();
+        const nextRoute = resolveDestinationAfterAuth(
+          u,
+          wh,
+          currentPath,
+          redirectParam
+        );
         syncRouteWithHistory(nextRoute, true);
         loadUnreadCount();
       }
@@ -237,7 +309,11 @@ export default function App() {
       setUnreadCount(0);
       const currentPath =
         typeof window !== 'undefined' ? window.location.pathname : '/';
-      syncRouteWithHistory(currentPath === '/login' ? '/login' : '/', true);
+      if (isQrOrderPath(currentPath)) {
+        syncRouteWithHistory('/login?redirect=/franchisee/order', true);
+      } else {
+        syncRouteWithHistory(currentPath === '/login' ? '/login' : '/', true);
+      }
     } finally {
       setLoading(false);
     }
@@ -247,16 +323,41 @@ export default function App() {
     refreshSession();
   }, []);
 
-  // Redirect logged-in users if route ever lands on "/" or "/login"
+  // Redirect logged-in users if route ever lands on "/", "/login", "/franchisee/order", or "/qr/{store_code}"
   useEffect(() => {
+    if (!loading && !user) {
+      if (isQrOrderPath(route)) {
+        syncRouteWithHistory('/login?redirect=/franchisee/order', true);
+      }
+      return;
+    }
     if (!loading && user) {
       if (user.must_change_password && route !== '/change-password') {
         syncRouteWithHistory('/change-password', true);
-      } else if (
-        !user.must_change_password &&
-        (route === '/' || route === '/login' || !route.startsWith(`/${user.role}`))
-      ) {
-        syncRouteWithHistory(defaultRouteForRole(user.role, hasWarehouse), true);
+      } else if (!user.must_change_password) {
+        if (isQrOrderPath(route)) {
+          const qrRes = resolveFranchiseeQrRouteAccess(user, hasWarehouse);
+          if (qrRes.action === 'redirect_role_dashboard') {
+            if (qrRes.message) setQrNoticeMessage(qrRes.message);
+            syncRouteWithHistory(qrRes.targetPath, true);
+          } else if (route !== '/franchisee/order') {
+            // Normalize /qr/{store_code} to /franchisee/order for the logged-in franchisee's own store
+            syncRouteWithHistory('/franchisee/order', true);
+          }
+        } else if (
+          route === '/' ||
+          route === '/login' ||
+          !route.startsWith(`/${user.role}`)
+        ) {
+          const redirectParam = getValidatedRedirectParam();
+          const nextRoute = resolveDestinationAfterAuth(
+            user,
+            hasWarehouse,
+            route,
+            redirectParam
+          );
+          syncRouteWithHistory(nextRoute, true);
+        }
       }
     }
   }, [loading, user, route, hasWarehouse]);
@@ -292,7 +393,11 @@ export default function App() {
   const navigateTo = (targetPath: string, trackOrderId?: number | null) => {
     setMobileMenuOpen(false);
     if (!user) {
-      syncRouteWithHistory(targetPath === '/login' ? '/login' : '/');
+      if (isQrOrderPath(targetPath)) {
+        syncRouteWithHistory('/login?redirect=/franchisee/order');
+      } else {
+        syncRouteWithHistory(targetPath === '/login' ? '/login' : '/');
+      }
       return;
     }
     if (user.must_change_password) {
@@ -310,6 +415,18 @@ export default function App() {
     if (trackOrderId) {
       setTrackingOrderId(trackOrderId);
     }
+    if (isQrOrderPath(targetPath)) {
+      const qrRes = resolveFranchiseeQrRouteAccess(user, hasWarehouse);
+      if (qrRes.action === 'redirect_role_dashboard') {
+        if (qrRes.message) setQrNoticeMessage(qrRes.message);
+        syncRouteWithHistory(qrRes.targetPath);
+        markRouteNotificationsRead(user.role, qrRes.targetPath);
+        return;
+      }
+      syncRouteWithHistory('/franchisee/order');
+      markRouteNotificationsRead(user.role, '/franchisee/catalog');
+      return;
+    }
     // Role-based access control: prevent opening another role's pages
     if (!targetPath.startsWith(`/${user.role}`)) {
       const fallback = defaultRouteForRole(user.role, hasWarehouse);
@@ -325,6 +442,7 @@ export default function App() {
     e.preventDefault();
     setLoginError('');
     setLoginBusy(true);
+    const redirectParamBeforeLogin = getValidatedRedirectParam();
     try {
       const res = await api.post('/auth/login', { username, password });
       localStorage.setItem('aice_token', res.token);
@@ -337,7 +455,13 @@ export default function App() {
       if (u.must_change_password) {
         syncRouteWithHistory('/change-password', true);
       } else {
-        syncRouteWithHistory(defaultRouteForRole(u.role, wh), true);
+        const dest = resolveDestinationAfterAuth(
+          u,
+          wh,
+          route,
+          redirectParamBeforeLogin
+        );
+        syncRouteWithHistory(dest, true);
         loadUnreadCount();
       }
     } catch (err: any) {
@@ -374,6 +498,7 @@ export default function App() {
     }
     localStorage.removeItem('aice_token');
     setUser(null);
+    setQrNoticeMessage('');
     setNotificationSummary(null);
     setUnreadCount(0);
     syncRouteWithHistory('/login');
@@ -408,9 +533,16 @@ export default function App() {
             syncRouteWithHistory('/login');
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
+          onOrderNowClick={() => {
+            setLoginError('');
+            syncRouteWithHistory('/login?redirect=/franchisee/order');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
         />
       );
     }
+
+    const activeRedirectParam = getValidatedRedirectParam();
 
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
@@ -431,6 +563,14 @@ export default function App() {
             <p className="text-sm text-slate-600">
               Online stock-replenishment ordering, warehouse inventory, and live delivery tracking. Sign in with your assigned account.
             </p>
+            {activeRedirectParam && isQrOrderPath(activeRedirectParam) && (
+              <div
+                data-testid="login-qr-redirect-hint"
+                className="p-2.5 rounded-lg border border-emerald-200 bg-emerald-50 text-xs font-medium text-emerald-900"
+              >
+                Sign in with your active Franchisee account to continue directly to stock ordering.
+              </div>
+            )}
           </div>
 
           {loginError && (
@@ -701,8 +841,10 @@ export default function App() {
 
   const navItems = SIDEBAR_BY_ROLE[user.role];
   const activeRoute = !hasWarehouse && user.role === 'admin' ? '/admin/warehouses' : route;
+  const normalizedSidebarRoute =
+    activeRoute === '/franchisee/order' ? '/franchisee/catalog' : activeRoute;
   const activeNavLabel =
-    navItems.find((n) => n.path === activeRoute)?.label ||
+    navItems.find((n) => n.path === normalizedSidebarRoute)?.label ||
     (activeRoute.includes('track-order') ? 'Track My Order' : 'Workspace');
 
   const renderMainContent = () => {
@@ -802,6 +944,7 @@ export default function App() {
           />
         );
       case '/franchisee/catalog':
+      case '/franchisee/order':
         return <CatalogAndCartView onTrackOrder={openTrackOrder} />;
       case '/franchisee/orders':
         return <FranchiseeOrdersView onTrackOrder={openTrackOrder} />;
@@ -886,7 +1029,7 @@ export default function App() {
           >
             {navItems.map((item) => {
               const isLocked = !hasWarehouse && item.path !== '/admin/warehouses';
-              const isActive = activeRoute === item.path;
+              const isActive = normalizedSidebarRoute === item.path;
               const rawBadgeCount = getSidebarBadgeCount(
                 user.role,
                 item.path,
@@ -899,7 +1042,10 @@ export default function App() {
                   key={item.path}
                   type="button"
                   disabled={isLocked}
-                  onClick={() => navigateTo(item.path)}
+                  onClick={() => {
+                    setQrNoticeMessage('');
+                    navigateTo(item.path);
+                  }}
                   className={`w-full text-left px-3 py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-between gap-2 whitespace-nowrap ${
                     isActive
                       ? 'bg-rose-600 text-white font-semibold'
@@ -973,7 +1119,25 @@ export default function App() {
         </header>
 
         <main className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-7xl w-full mx-auto">
+          <div className="max-w-7xl w-full mx-auto space-y-4">
+            {qrNoticeMessage && (
+              <div
+                role="alert"
+                data-testid="qr-role-notice-banner"
+                className="p-4 rounded-xl border-2 border-amber-300 bg-amber-50 flex items-center justify-between gap-3"
+              >
+                <div className="text-sm font-bold text-amber-950">
+                  {qrNoticeMessage}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setQrNoticeMessage('')}
+                  className="text-xs font-semibold text-amber-900 hover:underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             {renderMainContent()}
           </div>
         </main>

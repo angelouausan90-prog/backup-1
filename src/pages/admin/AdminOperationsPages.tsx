@@ -1370,7 +1370,16 @@ export const ReportsAndLogsView: React.FC = () => {
                 ) : (
                   sales.map((s, idx) => (
                     <tr key={idx}>
-                      <td className="py-2 pr-3 font-mono font-semibold">{s.order_number}</td>
+                      <td className="py-2 pr-3 font-mono font-semibold">
+                        <div>{s.order_number}</div>
+                        <span
+                          className={`inline-block text-[10px] font-bold uppercase ${
+                            s.source === 'QR' ? 'text-purple-700' : 'text-slate-500'
+                          }`}
+                        >
+                          Source: {s.source || 'Replenishment'}
+                        </span>
+                      </td>
                       <td className="py-2 pr-3">
                         <div>{s.store_name}</div>
                         {s.promo_name && (
@@ -2581,6 +2590,46 @@ export const SalesAnalyticsView: React.FC<{
               </div>
             </div>
           </div>
+
+          {/* Revenue by Order Source Breakdown (Replenishment vs Customer QR Orders) */}
+          {Array.isArray(data?.salesBySource) && data.salesBySource.length > 0 && (
+            <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Sales Analytics by Order Source (Replenishment vs Customer QR)
+                </h2>
+                <p className="text-xs text-slate-600">
+                  Confirmed/Accepted and Delivered customer QR orders are tagged with{' '}
+                  <code className="font-mono font-bold text-purple-800">source = 'QR'</code> and included in real-time sales analytics.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-4 text-xs">
+                {data.salesBySource.map((src: any) => (
+                  <div
+                    key={src.source}
+                    data-testid={`analytics-source-${src.source}`}
+                    className="px-3.5 py-2 rounded-lg border border-slate-200 bg-slate-50 flex items-center gap-3"
+                  >
+                    <span
+                      className={`font-mono font-bold uppercase ${
+                        src.source === 'QR' ? 'text-purple-800' : 'text-slate-900'
+                      }`}
+                    >
+                      source = '{src.source}'
+                    </span>
+                    <span className="text-slate-400">·</span>
+                    <span className="font-mono text-slate-700">
+                      <strong>{src.counted_orders ?? src.orders_count ?? 0}</strong> orders
+                    </span>
+                    <span className="text-slate-400">·</span>
+                    <span className="font-mono font-bold text-emerald-800">
+                      {formatPhp(src.total_revenue ?? src.revenue ?? 0)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* 3. Revenue Over Time + 5. Sales by Category */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

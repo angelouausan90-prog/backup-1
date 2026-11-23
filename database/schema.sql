@@ -237,3 +237,162 @@ CREATE TABLE IF NOT EXISTS activity_logs (
   INDEX idx_logs_created (created_at),
   CONSTRAINT fk_logs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+-- Digitized "NEW FRANCHISEE FORM" (AICE Cotabato-JCDL Corporation)
+CREATE TABLE IF NOT EXISTS franchisee_applications (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  application_no VARCHAR(40) NOT NULL UNIQUE,
+  franchisee_id INT NOT NULL UNIQUE,
+  user_id INT NOT NULL UNIQUE,
+  agent_id INT NOT NULL,
+  date_applied DATE NOT NULL,
+  first_name VARCHAR(80) NOT NULL,
+  middle_name VARCHAR(80) NOT NULL DEFAULT '',
+  last_name VARCHAR(80) NOT NULL,
+  complete_name VARCHAR(180) NOT NULL,
+  contact_number VARCHAR(40) NOT NULL,
+  store_name VARCHAR(150) NOT NULL,
+  street VARCHAR(150) NOT NULL,
+  barangay VARCHAR(120) NOT NULL,
+  city_municipality VARCHAR(120) NOT NULL,
+  province VARCHAR(120) NOT NULL,
+  full_address VARCHAR(350) NOT NULL,
+  landmark VARCHAR(255) NOT NULL DEFAULT '',
+  facebook_account VARCHAR(180) NOT NULL DEFAULT '',
+  email VARCHAR(120) NOT NULL,
+  remarks TEXT NOT NULL,
+  lat DECIMAL(10,7) NOT NULL,
+  lng DECIMAL(10,7) NOT NULL,
+  store_photo_url VARCHAR(255) NULL,
+  freezer_no VARCHAR(80) NOT NULL DEFAULT '',
+  status ENUM(
+    'Pending Admin Review',
+    'Approved',
+    'Rejected',
+    'For Delivery',
+    'Delivered',
+    'Active'
+  ) NOT NULL DEFAULT 'Pending Admin Review',
+  rejection_reason TEXT NULL,
+  approved_by INT NULL,
+  approved_at TIMESTAMP NULL,
+  assigned_delivery_user_id INT NULL,
+  assigned_at TIMESTAMP NULL,
+  date_delivered DATE NULL,
+  delivered_at TIMESTAMP NULL,
+  activated_at TIMESTAMP NULL,
+  cashier_name VARCHAR(120) NOT NULL DEFAULT '',
+  collector_name VARCHAR(120) NOT NULL DEFAULT '',
+  noted_by_name VARCHAR(120) NOT NULL DEFAULT '',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_fapp_franchisee FOREIGN KEY (franchisee_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+  CONSTRAINT fk_fapp_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_fapp_agent FOREIGN KEY (agent_id) REFERENCES agents(id),
+  CONSTRAINT fk_fapp_approver FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_fapp_delivery FOREIGN KEY (assigned_delivery_user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS franchisee_equipment (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  application_id INT NOT NULL,
+  item_name VARCHAR(80) NOT NULL,
+  item_condition ENUM('NEW', 'OLD', 'NOT_ISSUED') NOT NULL DEFAULT 'NOT_ISSUED',
+  quantity INT NOT NULL DEFAULT 0,
+  freezer_no VARCHAR(80) NOT NULL DEFAULT '',
+  updated_by INT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_app_equipment_item (application_id, item_name),
+  CONSTRAINT fk_feq_application FOREIGN KEY (application_id) REFERENCES franchisee_applications(id) ON DELETE CASCADE,
+  CONSTRAINT fk_feq_updater FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS franchisee_signatures (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  application_id INT NOT NULL,
+  role ENUM('customer', 'sales_agent', 'delivery_team', 'driver', 'collector', 'noted_by') NOT NULL,
+  printed_name VARCHAR(120) NOT NULL DEFAULT '',
+  signature_image LONGTEXT NULL,
+  signed_by_user_id INT NULL,
+  signed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_app_signature_role (application_id, role),
+  CONSTRAINT fk_fsig_application FOREIGN KEY (application_id) REFERENCES franchisee_applications(id) ON DELETE CASCADE,
+  CONSTRAINT fk_fsig_user FOREIGN KEY (signed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- ===== QR CODE ORDERING FOR CUSTOMERS (Per Franchisee Store) =====
+CREATE TABLE IF NOT EXISTS store_qr_codes (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  store_id INT NOT NULL UNIQUE,
+  store_code VARCHAR(40) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_sqc_store FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS store_inventory (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  store_id INT NOT NULL,
+  product_id INT NOT NULL,
+  quantity INT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_store_product (store_id, product_id),
+  CONSTRAINT fk_si_store FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+  CONSTRAINT fk_si_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS customer_orders (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_no VARCHAR(40) NOT NULL UNIQUE,
+  store_id INT NOT NULL,
+  customer_user_id INT NULL,
+  customer_name VARCHAR(150) NOT NULL,
+  contact_no VARCHAR(40) NOT NULL,
+  address VARCHAR(350) NOT NULL,
+  latitude DECIMAL(10,7) NOT NULL,
+  longitude DECIMAL(10,7) NOT NULL,
+  notes TEXT NULL,
+  payment_method VARCHAR(60) NOT NULL DEFAULT 'Cash on Delivery',
+  status ENUM(
+    'Placed',
+    'Accepted by store',
+    'Preparing',
+    'Out for Delivery',
+    'Delivered',
+    'Cancelled'
+  ) NOT NULL DEFAULT 'Placed',
+  rejection_reason TEXT NULL,
+  delivery_staff_id INT NULL,
+  stock_deducted TINYINT(1) NOT NULL DEFAULT 0,
+  total DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+  accepted_at TIMESTAMP NULL,
+  preparing_at TIMESTAMP NULL,
+  out_for_delivery_at TIMESTAMP NULL,
+  delivered_at TIMESTAMP NULL,
+  cancelled_at TIMESTAMP NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_co_store FOREIGN KEY (store_id) REFERENCES franchisees(id) ON DELETE CASCADE,
+  CONSTRAINT fk_co_customer FOREIGN KEY (customer_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_co_rider FOREIGN KEY (delivery_staff_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS customer_order_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_id INT NOT NULL,
+  product_id INT NOT NULL,
+  quantity INT NOT NULL,
+  unit_price DECIMAL(10,2) NOT NULL,
+  CONSTRAINT fk_coi_order FOREIGN KEY (order_id) REFERENCES customer_orders(id) ON DELETE CASCADE,
+  CONSTRAINT fk_coi_product FOREIGN KEY (product_id) REFERENCES products(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS customer_order_locations (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  order_id INT NOT NULL,
+  lat DECIMAL(10,7) NOT NULL,
+  lng DECIMAL(10,7) NOT NULL,
+  recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_col_order FOREIGN KEY (order_id) REFERENCES customer_orders(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+

@@ -1827,3 +1827,365 @@ export function checkChatbotIpAiLimit(
     remaining: Math.max(0, maxAiCallsPerHour - bucket.aiCallTimestamps.length),
   };
 }
+
+// ===== NEW FRANCHISEE FORM (AICE COTABATO-JCDL CORPORATION) DOMAIN RULES =====
+
+export const FRANCHISEE_EQUIPMENT_ITEMS = [
+  'Freezer',
+  'Lock & Key',
+  'Scraper',
+  'Baskets',
+  'Manual',
+  'Freezer Cover',
+] as const;
+
+export type FranchiseeEquipmentItemName = (typeof FRANCHISEE_EQUIPMENT_ITEMS)[number];
+
+export type EquipmentConditionType = 'NEW' | 'OLD' | 'NOT_ISSUED';
+
+export const FRANCHISEE_APPLICATION_TIMELINE_STEPS = [
+  'Pending Admin Review',
+  'Approved',
+  'For Delivery',
+  'Delivered',
+  'Active',
+] as const;
+
+export type FranchiseeApplicationStatus =
+  | 'Pending Admin Review'
+  | 'Pending'
+  | 'Approved'
+  | 'Rejected'
+  | 'For Delivery'
+  | 'Delivered'
+  | 'Active';
+
+/**
+ * Normalizes legacy 'Pending' to 'Pending Admin Review' while keeping all workflow statuses consistent.
+ */
+export function normalizeApplicationStatus(rawStatus: string | null | undefined): string {
+  const s = String(rawStatus || '').trim();
+  if (!s || s === 'Pending' || s === 'Pending Admin Review') {
+    return 'Pending Admin Review';
+  }
+  if (
+    s === 'Approved' ||
+    s === 'Rejected' ||
+    s === 'For Delivery' ||
+    s === 'Delivered' ||
+    s === 'Active'
+  ) {
+    return s;
+  }
+  return 'Pending Admin Review';
+}
+
+/**
+ * Returns the 0-based index (0..4) in FRANCHISEE_APPLICATION_TIMELINE_STEPS, or -1 if Rejected.
+ */
+export function getApplicationTimelineStepIndex(rawStatus: string | null | undefined): number {
+  const normalized = normalizeApplicationStatus(rawStatus);
+  if (normalized === 'Rejected') return -1;
+  const idx = FRANCHISEE_APPLICATION_TIMELINE_STEPS.indexOf(
+    normalized as (typeof FRANCHISEE_APPLICATION_TIMELINE_STEPS)[number]
+  );
+  return idx >= 0 ? idx : 0;
+}
+
+/**
+ * A franchisee cannot log in until the Admin approves them (Approved, For Delivery, Delivered, or Active).
+ */
+export function canFranchiseeLogin(rawStatus: string | null | undefined): boolean {
+  const normalized = normalizeApplicationStatus(rawStatus);
+  return ['Approved', 'For Delivery', 'Delivered', 'Active'].includes(normalized);
+}
+
+/**
+ * A franchisee cannot place replenishment orders until the equipment delivery checklist & signatures are completed (Delivered or Active).
+ */
+export function canFranchiseeOrderReplenishment(rawStatus: string | null | undefined): boolean {
+  const normalized = normalizeApplicationStatus(rawStatus);
+  return ['Delivered', 'Active'].includes(normalized);
+}
+
+/**
+ * Validates Philippine mobile number format:
+ * Accepts 09XXXXXXXXX (11 digits), +639XXXXXXXXX, or 639XXXXXXXXX (allowing spaces/dashes).
+ */
+export function isValidPhMobileNumber(phone: string | null | undefined): boolean {
+  if (!phone) return false;
+  const stripped = String(phone).replace(/[\s\-()]/g, '').trim();
+  return /^(09\d{9}|\+?639\d{9})$/.test(stripped);
+}
+
+/**
+ * Normalizes a valid Philippine mobile number to standard 11-digit 09XXXXXXXXX format.
+ */
+export function normalizePhMobileNumber(phone: string | null | undefined): string {
+  const stripped = String(phone || '').replace(/[\s\-()]/g, '').trim();
+  if (/^\+639\d{9}$/.test(stripped)) {
+    return '0' + stripped.slice(3);
+  }
+  if (/^639\d{9}$/.test(stripped)) {
+    return '0' + stripped.slice(2);
+  }
+  return stripped;
+}
+
+/**
+ * Formats an auto-generated application number: FR-YYYY-0001
+ */
+export function formatApplicationNumber(seq: number, year = 2026): string {
+  const safeSeq = Math.max(1, Math.floor(Number(seq) || 1));
+  return `FR-${year}-${String(safeSeq).padStart(4, '0')}`;
+}
+
+/**
+ * Combines first, middle, and last name into complete applicant name.
+ */
+export function composeApplicantFullName(
+  firstName: string,
+  middleName: string | null | undefined,
+  lastName: string
+): string {
+  return [firstName, middleName, lastName]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+/**
+ * Combines street, barangay, city/municipality, and province into a complete store address.
+ */
+export function composeStoreFullAddress(
+  street: string,
+  barangay: string,
+  cityMunicipality: string,
+  province: string
+): string {
+  const s = String(street || '').trim();
+  const b = String(barangay || '').trim();
+  const c = String(cityMunicipality || '').trim();
+  const p = String(province || '').trim();
+  const formattedBrgy = b && !/^brgy\.?/i.test(b) && !/^barangay/i.test(b) ? `Brgy. ${b}` : b;
+  return [s, formattedBrgy, c, p].filter(Boolean).join(', ');
+}
+
+export interface FranchiseeStep1Input {
+  date_applied: string;
+  first_name: string;
+  middle_name?: string;
+  last_name: string;
+  contact_number: string;
+  store_name?: string;
+  email: string;
+  facebook_account?: string;
+  remarks?: string;
+  initial_password?: string;
+  is_editing?: boolean;
+}
+
+export type ValidationResultMap = Record<string, string> & {
+  ok: boolean;
+  errors: Record<string, string>;
+};
+
+function attachValidationResultProps(errors: Record<string, string>): ValidationResultMap {
+  const copy = { ...errors };
+  Object.defineProperties(errors, {
+    ok: {
+      value: Object.keys(copy).length === 0,
+      enumerable: false,
+    },
+    errors: {
+      value: copy,
+      enumerable: false,
+    },
+  });
+  return errors as ValidationResultMap;
+}
+
+export function validateFranchiseeStep1(
+  input: FranchiseeStep1Input,
+  requirePassword?: boolean
+): ValidationResultMap {
+  const errors: Record<string, string> = {};
+  if (!String(input.date_applied || '').trim()) {
+    errors.date_applied = 'Date applied is required.';
+  }
+  if (!String(input.first_name || '').trim()) {
+    errors.first_name = 'First name is required.';
+  }
+  if (!String(input.last_name || '').trim()) {
+    errors.last_name = 'Last name is required.';
+  }
+  if (input.store_name !== undefined && !String(input.store_name || '').trim()) {
+    errors.store_name = 'Store name is required.';
+  }
+  if (!String(input.contact_number || '').trim()) {
+    errors.contact_number = 'Contact number is required.';
+  } else if (!isValidPhMobileNumber(input.contact_number)) {
+    errors.contact_number = 'Enter a valid PH mobile number (e.g. 09171234567 or +639171234567).';
+  }
+
+  const emailStr = String(input.email || '').trim();
+  if (!emailStr) {
+    errors.email = 'Email address is required.';
+  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailStr)) {
+    errors.email = 'Enter a valid email address.';
+  }
+
+  const mustHavePwd =
+    requirePassword !== undefined ? requirePassword : !input.is_editing;
+  if (mustHavePwd) {
+    const pwd = String(input.initial_password || '');
+    if (!pwd || pwd.length < 8) {
+      errors.initial_password = 'Initial password must be at least 8 characters.';
+    }
+  } else if (input.initial_password && String(input.initial_password).length < 8) {
+    errors.initial_password = 'Password must be at least 8 characters if provided.';
+  }
+
+  return attachValidationResultProps(errors);
+}
+
+export interface FranchiseeStep2Input {
+  store_name?: string;
+  street: string;
+  barangay: string;
+  city_municipality: string;
+  province: string;
+  landmark?: string;
+  lat: number | null;
+  lng: number | null;
+}
+
+export function validateFranchiseeStep2(input: FranchiseeStep2Input): ValidationResultMap {
+  const errors: Record<string, string> = {};
+  if (input.store_name !== undefined && !String(input.store_name || '').trim()) {
+    errors.store_name = 'Store name is required.';
+  }
+  if (!String(input.street || '').trim()) {
+    errors.street = 'Street / Purok / Building is required.';
+  }
+  if (!String(input.barangay || '').trim()) {
+    errors.barangay = 'Barangay is required.';
+  }
+  if (!String(input.city_municipality || '').trim()) {
+    errors.city_municipality = 'City / Municipality is required.';
+  }
+  if (!String(input.province || '').trim()) {
+    errors.province = 'Province is required.';
+  }
+  if (!isValidCoords(input.lat, input.lng)) {
+    errors.coords = 'Please pin the store location on the map.';
+  }
+  return attachValidationResultProps(errors);
+}
+
+// ===== FRANCHISEE QR CODE & SAFE REDIRECT ROUTING RULES =====
+
+/**
+ * Validates and sanitizes a post-login redirect parameter so it ONLY allows internal application paths.
+ * Rejects protocol-relative URLs (//...), full external URLs (http://, https://), javascript: URIs,
+ * backslashes, and control characters.
+ */
+export function sanitizeInternalRedirectPath(rawRedirect: string | null | undefined): string | null {
+  if (!rawRedirect) return null;
+  const trimmed = String(rawRedirect).trim();
+  if (!trimmed) return null;
+  if (!trimmed.startsWith('/')) return null;
+  if (trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/i.test(trimmed)) return null;
+  if (/[\u0000-\u001F\u007F\\]/.test(trimmed)) return null;
+  if (trimmed === '/login' || trimmed.startsWith('/login?')) return null;
+  return trimmed;
+}
+
+/**
+ * Builds the canonical Franchisee Ordering QR code target URL: {APP_BASE_URL}/franchisee/order
+ * Strips trailing slashes from baseUrl so there are never double slashes.
+ */
+export function buildFranchiseeOrderQrUrl(baseUrl: string | null | undefined): string {
+  const cleanBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  return cleanBase ? `${cleanBase}/franchisee/order` : '/franchisee/order';
+}
+
+/**
+ * Builds the per-store printed poster QR code target URL: {APP_BASE_URL}/qr/{store_code}
+ */
+export function buildStorePosterQrUrl(
+  baseUrl: string | null | undefined,
+  storeCode: string | null | undefined
+): string {
+  const cleanBase = String(baseUrl || '').trim().replace(/\/+$/, '');
+  const code = encodeURIComponent(String(storeCode || '').trim() || 'STORE');
+  return cleanBase ? `${cleanBase}/qr/${code}` : `/qr/${code}`;
+}
+
+export interface QrRouteResolution {
+  action: 'redirect_login' | 'allow_order' | 'show_inactive' | 'redirect_role_dashboard';
+  targetPath: string;
+  message?: string;
+}
+
+/**
+ * Resolves the route behavior when opening /franchisee/order or /qr/{store_code}:
+ * - Not logged in: redirect to /login?redirect=/franchisee/order
+ * - Logged in as an Active Franchisee: go straight to that franchisee's own replenishment ordering page (/franchisee/order)
+ * - Logged in as a franchisee who is not Active: show "Your account is not active yet."
+ * - Logged in as Admin, Agent, or Delivery Staff: redirect to their own dashboard with the message "This QR is for franchisees."
+ */
+export function resolveFranchiseeQrRouteAccess(
+  user: {
+    role: 'admin' | 'agent' | 'franchisee' | 'delivery';
+    franchisee?: {
+      application_status?: string | null;
+      can_order_replenishment?: boolean;
+    } | null;
+  } | null,
+  hasWarehouse = true
+): QrRouteResolution {
+  if (!user) {
+    return {
+      action: 'redirect_login',
+      targetPath: '/login?redirect=/franchisee/order',
+    };
+  }
+
+  if (user.role !== 'franchisee') {
+    const dashboardMap: Record<'admin' | 'agent' | 'delivery', string> = {
+      admin: hasWarehouse ? '/admin/dashboard' : '/admin/warehouses',
+      agent: hasWarehouse ? '/agent/dashboard' : '/warehouse-locked',
+      delivery: hasWarehouse ? '/delivery/dashboard' : '/warehouse-locked',
+    };
+    return {
+      action: 'redirect_role_dashboard',
+      targetPath: dashboardMap[user.role],
+      message: 'This QR is for franchisees.',
+    };
+  }
+
+  const rawStatus = user.franchisee?.application_status || 'Pending Admin Review';
+  const normalized = normalizeApplicationStatus(rawStatus);
+  const isActiveFranchisee =
+    normalized === 'Active' ||
+    normalized === 'Delivered' ||
+    Boolean(user.franchisee?.can_order_replenishment);
+
+  if (!isActiveFranchisee) {
+    return {
+      action: 'show_inactive',
+      targetPath: '/franchisee/order',
+      message: 'Your account is not active yet.',
+    };
+  }
+
+  return {
+    action: 'allow_order',
+    targetPath: '/franchisee/order',
+  };
+}
+
+
+

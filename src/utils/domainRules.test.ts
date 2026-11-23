@@ -38,6 +38,22 @@ import {
   checkChatbotIpMessageLimit,
   checkChatbotIpAiLimit,
   ChatbotIpBucket,
+  FRANCHISEE_EQUIPMENT_ITEMS,
+  normalizeApplicationStatus,
+  getApplicationTimelineStepIndex,
+  canFranchiseeLogin,
+  canFranchiseeOrderReplenishment,
+  isValidPhMobileNumber,
+  normalizePhMobileNumber,
+  formatApplicationNumber,
+  composeApplicantFullName,
+  composeStoreFullAddress,
+  validateFranchiseeStep1,
+  validateFranchiseeStep2,
+  sanitizeInternalRedirectPath,
+  buildFranchiseeOrderQrUrl,
+  buildStorePosterQrUrl,
+  resolveFranchiseeQrRouteAccess,
   PromoDefinition,
 } from './domainRules';
 
@@ -557,3 +573,164 @@ test('public chatbot FAQ matching, Gemini AI fallback config, rate limits, and o
   }
   assert.equal(checkChatbotIpAiLimit(rateMap, '127.0.0.1', now + 2000).allowed, false);
 });
+
+test('NEW FRANCHISEE FORM rules: PH mobile validation, status workflow, login/ordering gates, and step validation', () => {
+  assert.equal(FRANCHISEE_EQUIPMENT_ITEMS.length, 6);
+  assert.deepEqual(FRANCHISEE_EQUIPMENT_ITEMS, [
+    'Freezer',
+    'Lock & Key',
+    'Scraper',
+    'Baskets',
+    'Manual',
+    'Freezer Cover',
+  ]);
+
+  // 1. PH Mobile validation & normalization
+  assert.equal(isValidPhMobileNumber('09171234567'), true);
+  assert.equal(isValidPhMobileNumber('+639171234567'), true);
+  assert.equal(isValidPhMobileNumber('63917-123-4567'), true);
+  assert.equal(isValidPhMobileNumber('08171234567'), false);
+  assert.equal(isValidPhMobileNumber('091712345'), false);
+  assert.equal(normalizePhMobileNumber('+63917 123 4567'), '09171234567');
+
+  // 2. Application number & name/address composition
+  assert.equal(formatApplicationNumber(1, 2026), 'FR-2026-0001');
+  assert.equal(formatApplicationNumber(42, 2026), 'FR-2026-0042');
+  assert.equal(composeApplicantFullName('Elena', 'Marie', 'Bautista'), 'Elena Marie Bautista');
+  assert.equal(composeApplicantFullName('Elena', '', 'Bautista'), 'Elena Bautista');
+  assert.equal(
+    composeStoreFullAddress('54 Sinsuat Ave', 'Rosary Heights', 'Cotabato City', 'Maguindanao del Norte'),
+    '54 Sinsuat Ave, Brgy. Rosary Heights, Cotabato City, Maguindanao del Norte'
+  );
+
+  // 3. Status workflow, timeline index, login gate, and replenishment order gate
+  assert.equal(normalizeApplicationStatus('Pending'), 'Pending Admin Review');
+  assert.equal(getApplicationTimelineStepIndex('Pending Admin Review'), 0);
+  assert.equal(getApplicationTimelineStepIndex('Approved'), 1);
+  assert.equal(getApplicationTimelineStepIndex('For Delivery'), 2);
+  assert.equal(getApplicationTimelineStepIndex('Delivered'), 3);
+  assert.equal(getApplicationTimelineStepIndex('Active'), 4);
+  assert.equal(getApplicationTimelineStepIndex('Rejected'), -1);
+
+  assert.equal(canFranchiseeLogin('Pending Admin Review'), false);
+  assert.equal(canFranchiseeLogin('Rejected'), false);
+  assert.equal(canFranchiseeLogin('Approved'), true);
+  assert.equal(canFranchiseeLogin('For Delivery'), true);
+  assert.equal(canFranchiseeLogin('Delivered'), true);
+  assert.equal(canFranchiseeLogin('Active'), true);
+
+  assert.equal(canFranchiseeOrderReplenishment('Pending Admin Review'), false);
+  assert.equal(canFranchiseeOrderReplenishment('Approved'), false);
+  assert.equal(canFranchiseeOrderReplenishment('For Delivery'), false);
+  assert.equal(canFranchiseeOrderReplenishment('Delivered'), true);
+  assert.equal(canFranchiseeOrderReplenishment('Active'), true);
+
+  // 4. Step 1 & Step 2 inline validation
+  const step1Errs = validateFranchiseeStep1({
+    date_applied: '2026-11-22',
+    first_name: 'Elena',
+    last_name: 'Bautista',
+    contact_number: '12345',
+    email: 'invalid-email',
+    initial_password: 'short',
+  });
+  assert.equal(Boolean(step1Errs.contact_number), true);
+  assert.equal(Boolean(step1Errs.email), true);
+  assert.equal(Boolean(step1Errs.initial_password), true);
+
+  const step2Errs = validateFranchiseeStep2({
+    store_name: 'AICE Cotabato Plaza Mart',
+    street: '12 Sinsuat Ave',
+    barangay: 'Rosary Heights',
+    city_municipality: 'Cotabato City',
+    province: 'Maguindanao del Norte',
+    lat: null,
+    lng: null,
+  });
+  assert.equal(Boolean(step2Errs.coords), true);
+});
+
+test('Franchisee QR code URLs, safe internal redirect validation, and role/status QR route resolution', () => {
+  // 1. Safe internal redirect sanitizer
+  assert.equal(sanitizeInternalRedirectPath('/franchisee/order'), '/franchisee/order');
+  assert.equal(sanitizeInternalRedirectPath('/qr/FR-2026-0001'), '/qr/FR-2026-0001');
+  assert.equal(sanitizeInternalRedirectPath('https://evil.example.com'), null);
+  assert.equal(sanitizeInternalRedirectPath('//evil.example.com'), null);
+  assert.equal(sanitizeInternalRedirectPath('/\\evil.example.com'), null);
+  assert.equal(sanitizeInternalRedirectPath('javascript:alert(1)'), null);
+  assert.equal(sanitizeInternalRedirectPath('/login'), null);
+  assert.equal(sanitizeInternalRedirectPath(''), null);
+
+  // 2. QR URL builders with APP_BASE_URL
+  assert.equal(
+    buildFranchiseeOrderQrUrl('https://aicehub.example.com/'),
+    'https://aicehub.example.com/franchisee/order'
+  );
+  assert.equal(
+    buildStorePosterQrUrl('https://aicehub.example.com/', 'FR-2026-0001'),
+    'https://aicehub.example.com/qr/FR-2026-0001'
+  );
+
+  // 3. Route behavior for /franchisee/order and /qr/{store_code}
+  // Logged out -> redirect to /login?redirect=/franchisee/order
+  assert.deepEqual(resolveFranchiseeQrRouteAccess(null, true), {
+    action: 'redirect_login',
+    targetPath: '/login?redirect=/franchisee/order',
+  });
+
+  // Active franchisee -> allow ordering page
+  assert.deepEqual(
+    resolveFranchiseeQrRouteAccess(
+      {
+        role: 'franchisee',
+        franchisee: {
+          application_status: 'Active',
+          can_order_replenishment: true,
+        },
+      },
+      true
+    ),
+    {
+      action: 'allow_order',
+      targetPath: '/franchisee/order',
+    }
+  );
+
+  // Non-Active franchisee -> show "Your account is not active yet."
+  assert.deepEqual(
+    resolveFranchiseeQrRouteAccess(
+      {
+        role: 'franchisee',
+        franchisee: {
+          application_status: 'Approved',
+          can_order_replenishment: false,
+        },
+      },
+      true
+    ),
+    {
+      action: 'show_inactive',
+      targetPath: '/franchisee/order',
+      message: 'Your account is not active yet.',
+    }
+  );
+
+  // Admin, Agent, Delivery Staff -> redirect to own dashboard with "This QR is for franchisees."
+  assert.deepEqual(resolveFranchiseeQrRouteAccess({ role: 'admin' }, true), {
+    action: 'redirect_role_dashboard',
+    targetPath: '/admin/dashboard',
+    message: 'This QR is for franchisees.',
+  });
+  assert.deepEqual(resolveFranchiseeQrRouteAccess({ role: 'agent' }, true), {
+    action: 'redirect_role_dashboard',
+    targetPath: '/agent/dashboard',
+    message: 'This QR is for franchisees.',
+  });
+  assert.deepEqual(resolveFranchiseeQrRouteAccess({ role: 'delivery' }, true), {
+    action: 'redirect_role_dashboard',
+    targetPath: '/delivery/dashboard',
+    message: 'This QR is for franchisees.',
+  });
+});
+
+
