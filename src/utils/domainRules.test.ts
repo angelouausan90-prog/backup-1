@@ -54,12 +54,15 @@ import {
   buildFranchiseeOrderQrUrl,
   buildStorePosterQrUrl,
   resolveFranchiseeQrRouteAccess,
+  COTABATO_CITY_COORDS,
+  formatRoleDisplayLabel,
+  formatSidebarUserFooter,
   PromoDefinition,
 } from './domainRules';
 
-test('haversineKm calculates distance between Manila and Quezon City accurately', () => {
-  const km = haversineKm(14.6042, 120.9921, 14.6191, 121.0537);
-  assert.equal(km > 6 && km < 8, true);
+test('haversineKm calculates distance between two Cotabato City coordinates accurately', () => {
+  const km = haversineKm(7.2236, 124.2464, 7.1812, 124.2294);
+  assert.equal(km > 4 && km < 6, true);
 });
 
 test('estimateEtaMinutes enforces minimum 2 minutes and scales with distance', () => {
@@ -69,17 +72,17 @@ test('estimateEtaMinutes enforces minimum 2 minutes and scales with distance', (
 
 test('buildFranchiseeUsernameBase sanitizes owner name into lowercase alphanumeric prefix', () => {
   assert.equal(buildFranchiseeUsernameBase('Juan Dela Cruz!', 'AICE Store'), 'juandelacruz');
-  assert.equal(buildFranchiseeUsernameBase('', 'Cubao Mart #2'), 'cubaomart2');
+  assert.equal(buildFranchiseeUsernameBase('', 'Awang Mart #2'), 'awangmart2');
 });
 
 test('isValidCoords validates GPS coordinates and rejects empty or out-of-range values', () => {
-  assert.equal(isValidCoords(14.5995, 120.9842), true);
+  assert.equal(isValidCoords(COTABATO_CITY_COORDS.lat, COTABATO_CITY_COORDS.lng), true);
   assert.equal(isValidCoords(95, 120), false);
   assert.equal(isValidCoords('', ''), false);
   assert.equal(isValidCoords(null, 120), false);
 });
 
-test('requiresForcedPasswordChange skips forced change for test accounts (is_test=1)', () => {
+test('requiresForcedPasswordChange skips forced change for pre-verified accounts', () => {
   assert.equal(requiresForcedPasswordChange({ must_change_password: 1, is_test: 0 }), true);
   assert.equal(requiresForcedPasswordChange({ must_change_password: 1, is_test: 1 }), false);
   assert.equal(requiresForcedPasswordChange({ must_change_password: 0, is_test: 0 }), false);
@@ -417,13 +420,14 @@ test('formatBadgeCount, formatRelativeTimeAgo, resolveNotificationTargetRoute, a
 test('public endpoint projections strip private fields, hide prices unless enabled, and extract general store area only', () => {
   assert.equal(sanitizePublicText('<script>alert(1)</script>AICE Choco'), 'alert(1)AICE Choco');
   assert.equal(
-    extractGeneralAreaFromAddress('124 Espana Blvd, Sampaloc, Manila'),
-    'Sampaloc, Manila'
+    extractGeneralAreaFromAddress('124 Notre Dame Ave, Poblacion VI, Cotabato City'),
+    'Poblacion VI, Cotabato City'
   );
   assert.equal(
-    extractGeneralAreaFromAddress('88 Aurora Blvd, Cubao, Quezon City'),
-    'Cubao, Quezon City'
+    extractGeneralAreaFromAddress('88 Sinsuat Ave, Rosary Heights VII, Cotabato City'),
+    'Rosary Heights VII, Cotabato City'
   );
+  assert.equal(extractGeneralAreaFromAddress(''), 'Cotabato City');
 
   const rawProd = {
     id: 5,
@@ -452,20 +456,20 @@ test('public endpoint projections strip private fields, hide prices unless enabl
     user_id: 4,
     agent_id: 1,
     owner_name: 'Juan Dela Cruz',
-    store_name: 'AICE Sampaloc Corner Store',
-    address: '124 Espana Blvd, Sampaloc, Manila',
+    store_name: 'AICE Notre Dame Avenue Corner Store',
+    address: '124 Notre Dame Ave, Poblacion VI, Cotabato City',
     contact_number: '09173333333',
-    username: 'franchisee_test',
-    lat: 14.6042,
-    lng: 120.9921,
+    username: 'juandelacruz',
+    lat: 7.2215,
+    lng: 124.2482,
   };
   const publicStore = projectPublicStore(rawStore);
   assert.deepEqual(publicStore, {
     id: 1,
-    store_name: 'AICE Sampaloc Corner Store',
-    area: 'Sampaloc, Manila',
-    lat: 14.6042,
-    lng: 120.9921,
+    store_name: 'AICE Notre Dame Avenue Corner Store',
+    area: 'Poblacion VI, Cotabato City',
+    lat: 7.2215,
+    lng: 124.2482,
   });
   assert.equal('owner_name' in (publicStore as any), false);
   assert.equal('contact_number' in (publicStore as any), false);
@@ -487,7 +491,7 @@ test('public endpoint projections strip private fields, hide prices unless enabl
 });
 
 test('public chatbot FAQ matching, Gemini AI fallback config, rate limits, and output sanitization work accurately', () => {
-  const sampleFaqs = [
+  const faqEntries = [
     {
       id: 1,
       question: 'How do approved franchisees place stock-replenishment orders?',
@@ -509,16 +513,16 @@ test('public chatbot FAQ matching, Gemini AI fallback config, rate limits, and o
   ];
 
   // 1. FAQ match succeeds on exact or paraphrased in-scope question
-  const match1 = matchFaqQuestion('How can I apply to become an AICE franchisee?', sampleFaqs);
+  const match1 = matchFaqQuestion('How can I apply to become an AICE franchisee?', faqEntries);
   assert.equal(match1.matched, true);
   assert.equal(match1.faq?.id, 2);
 
-  const match2 = matchFaqQuestion('how do franchisees place stock replenishment orders?', sampleFaqs);
+  const match2 = matchFaqQuestion('how do franchisees place stock replenishment orders?', faqEntries);
   assert.equal(match2.matched, true);
   assert.equal(match2.faq?.id, 1);
 
   // 2. Unrelated question does not pass threshold
-  const miss = matchFaqQuestion('What is the atomic weight of molybdenum in space?', sampleFaqs);
+  const miss = matchFaqQuestion('What is the atomic weight of molybdenum in space?', faqEntries);
   assert.equal(miss.matched, false);
   assert.equal(miss.faq, null);
 
@@ -552,7 +556,7 @@ test('public chatbot FAQ matching, Gemini AI fallback config, rate limits, and o
   assert.equal(fallback.includes('+63 (02) 8888-2423'), true);
 
   // 7. Context prompt includes only public FAQs and visitor message (max 200 chars)
-  const prompt = buildChatbotFaqContextPrompt(sampleFaqs, 'Can I sign up online?');
+  const prompt = buildChatbotFaqContextPrompt(faqEntries, 'Can I sign up online?');
   assert.equal(prompt.includes('Public FAQ Context:'), true);
   assert.equal(prompt.includes('Can I sign up online?'), true);
   assert.equal(CHATBOT_SYSTEM_PROMPT.includes('Keep answers under 80 words'), true);
@@ -733,4 +737,44 @@ test('Franchisee QR code URLs, safe internal redirect validation, and role/statu
   });
 });
 
+test('production role labels and sidebar user footer format cleanly for all roles with neutral User fallback', () => {
+  assert.equal(formatRoleDisplayLabel('admin'), 'Administrator');
+  assert.equal(formatRoleDisplayLabel('agent'), 'Sales Agent');
+  assert.equal(formatRoleDisplayLabel('franchisee'), 'Franchisee');
+  assert.equal(formatRoleDisplayLabel('delivery'), 'Delivery Rider');
+  assert.equal(formatRoleDisplayLabel(''), 'User');
 
+  assert.deepEqual(
+    formatSidebarUserFooter({
+      full_name: 'Maria Santos',
+      role: 'agent',
+    }),
+    {
+      primaryName: 'Maria Santos',
+      secondaryLabel: 'Sales Agent',
+    }
+  );
+
+  assert.deepEqual(
+    formatSidebarUserFooter({
+      full_name: 'Juan Dela Cruz',
+      role: 'franchisee',
+      franchisee: { store_name: 'AICE Notre Dame Avenue Corner Store' },
+    }),
+    {
+      primaryName: 'Juan Dela Cruz',
+      secondaryLabel: 'AICE Notre Dame Avenue Corner Store',
+    }
+  );
+
+  assert.deepEqual(
+    formatSidebarUserFooter({
+      full_name: '',
+      role: 'admin',
+    }),
+    {
+      primaryName: 'User',
+      secondaryLabel: 'Administrator',
+    }
+  );
+});

@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { api } from '../../services/api';
 import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
-import { ORDER_TIMELINE_STEPS, getTimelineStepIndex } from '../../utils/domainRules';
+import {
+  ORDER_TIMELINE_STEPS,
+  getTimelineStepIndex,
+} from '../../utils/domainRules';
 import {
   ApplicationStatusBadge,
   ApplicationWorkflowTimeline,
@@ -77,7 +80,7 @@ export const FranchiseeDashboard: React.FC<{
               </h2>
               <p className="text-xs text-slate-600">
                 Date Applied: <strong className="font-mono">{myApplication.date_applied}</strong> ·
-                Sales Agent: <strong>{myApplication.agent_name}</strong> · Freezer #:{' '}
+                Sales Agent: <strong>{myApplication.agent_name || 'User'}</strong> · Freezer #:{' '}
                 <strong className="font-mono text-slate-900">
                   {myApplication.freezer_no || 'Pending Delivery Handover'}
                 </strong>{' '}
@@ -113,7 +116,7 @@ export const FranchiseeDashboard: React.FC<{
               {myApplication.assigned_delivery_staff_name && (
                 <span className="block mt-1">
                   Assigned Equipment Delivery Staff:{' '}
-                  <strong>{myApplication.assigned_delivery_staff_name}</strong> (
+                  <strong>{myApplication.assigned_delivery_staff_name || 'User'}</strong> (
                   {myApplication.assigned_delivery_staff_contact || '—'})
                 </span>
               )}
@@ -441,7 +444,7 @@ export const CatalogAndCartView: React.FC<{
     }
   };
 
-  // If the logged-in franchisee is not Active yet (e.g. Pending, Approved, or For Delivery), show "Your account is not active yet."
+  // If the logged-in franchisee is not Active yet (Pending, Approved, or For Delivery), show "Your account is not active yet."
   if (!appLoading && myApplication && !myApplication.can_order_replenishment) {
     return (
       <div className="space-y-6">
@@ -910,7 +913,7 @@ export const CatalogAndCartView: React.FC<{
               <textarea
                 id="ord-notes"
                 rows={2}
-                placeholder="e.g. Call 10 minutes before arrival; unload at side freezer gate"
+                placeholder="Enter delivery instructions or gate access notes"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs"
@@ -1168,12 +1171,12 @@ export const TrackOrderView: React.FC<{
     }
 
     const { order, liveLocation } = payload;
-    const whLat = Number(order.warehouse_lat);
-    const whLng = Number(order.warehouse_lng);
-    const stLat = Number(order.store_lat);
-    const stLng = Number(order.store_lng);
+    const whLat = Number(order.warehouse_lat) || 7.2236;
+    const whLng = Number(order.warehouse_lng) || 124.2464;
+    const stLat = Number(order.store_lat) || 7.2236;
+    const stLng = Number(order.store_lng) || 124.2464;
 
-    const map = L.map(mapDiv.current).setView([(whLat + stLat) / 2, (whLng + stLng) / 2], 12);
+    const map = L.map(mapDiv.current).setView([(whLat + stLat) / 2, (whLng + stLng) / 2], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);
@@ -1202,7 +1205,7 @@ export const TrackOrderView: React.FC<{
       L.marker([rLat, rLng], { icon: makeIcon('#DC2626', 'RIDER LIVE') })
         .addTo(map)
         .bindPopup(
-          `<strong>Delivery Rider: ${order.delivery_staff_name || 'Assigned'}</strong><br/>Updated: ${liveLocation.recorded_at}`
+          `<strong>Delivery Rider: ${order.delivery_staff_name || 'User'}</strong><br/>Updated: ${liveLocation.recorded_at}`
         );
     }
     routeCoords.push([stLat, stLng]);
@@ -1274,7 +1277,7 @@ export const TrackOrderView: React.FC<{
 
       {Boolean(order.near_notified) && order.status !== 'Delivered' && (
         <div className="p-4 rounded-lg border border-rose-300 bg-rose-50 text-sm text-rose-950 font-medium">
-          Heads up! Your delivery rider ({order.delivery_staff_name}) has signaled they are near or arrived at your store.
+          Heads up! Your delivery rider ({order.delivery_staff_name || 'User'}) has signaled they are near or arrived at your store.
         </div>
       )}
 
@@ -1320,7 +1323,9 @@ export const TrackOrderView: React.FC<{
             <h3 className="text-xs font-semibold text-slate-500">Delivery Rider & ETA</h3>
             {order.delivery_staff_name ? (
               <div className="space-y-1 text-sm">
-                <div className="font-semibold text-slate-900">{order.delivery_staff_name}</div>
+                <div className="font-semibold text-slate-900">
+                  {order.delivery_staff_name || 'User'}
+                </div>
                 <div className="text-xs text-slate-600">
                   Contact:{' '}
                   <a

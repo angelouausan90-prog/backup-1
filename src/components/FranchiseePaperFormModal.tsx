@@ -114,7 +114,7 @@ export function downloadApplicationPdf(appRecord: any) {
   doc.text(
     `Application No: ${appRecord.application_no || `FR-${appRecord.id}`}   |   Status: ${normalizeApplicationStatus(
       appRecord.status
-    )}   |   Account: @${appRecord.username || 'N/A'}`,
+    )}   |   Store: ${appRecord.store_name || 'N/A'}`,
     pageWidth / 2,
     19.5,
     { align: 'center' }
@@ -425,8 +425,10 @@ export const FranchiseePaperFormDocument: React.FC<{
             </strong>
           </span>
           <span>
-            Account Username:{' '}
-            <strong className="font-mono text-blue-700">@{application.username}</strong>
+            Account ID:{' '}
+            <strong className="font-mono text-blue-700">
+              {application.username || '—'}
+            </strong>
           </span>
           <div className="flex items-center gap-1.5">
             <span>Status:</span>
@@ -754,7 +756,7 @@ export const FranchiseePaperFormModal: React.FC<FranchiseePaperFormModalProps> =
         rec.signatures?.noted_by?.printed_name ||
           rec.noted_by_name ||
           rec.approved_by_name ||
-          'Test Admin'
+          ''
       );
       setNotedBySig(rec.signatures?.noted_by?.signature_image || null);
     } catch (err: any) {
@@ -988,7 +990,7 @@ export const FranchiseePaperFormModal: React.FC<FranchiseePaperFormModalProps> =
                         <option value="">-- Select Delivery Staff Rider --</option>
                         {riders.map((r) => (
                           <option key={r.id} value={r.id}>
-                            {r.full_name} (@{r.username} • {r.contact_number || 'No phone'})
+                            {r.full_name || 'User'} ({r.contact_number || 'Delivery Rider'})
                           </option>
                         ))}
                       </select>
@@ -1002,7 +1004,7 @@ export const FranchiseePaperFormModal: React.FC<FranchiseePaperFormModalProps> =
                         type="text"
                         value={freezerNo}
                         onChange={(e) => setFreezerNo(e.target.value)}
-                        placeholder="e.g. FZ-COT-2026-0105"
+                        placeholder="Enter freezer serial or asset number"
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                       />
                     </div>
@@ -1015,7 +1017,7 @@ export const FranchiseePaperFormModal: React.FC<FranchiseePaperFormModalProps> =
                         type="text"
                         value={cashierName}
                         onChange={(e) => setCashierName(e.target.value)}
-                        placeholder="e.g. Lorna Bautista"
+                        placeholder="Enter cashier full name"
                         className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg"
                       />
                     </div>

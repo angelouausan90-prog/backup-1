@@ -220,7 +220,7 @@ const CompleteEquipmentDeliveryModal: React.FC<{
                   <input
                     type="text"
                     required
-                    placeholder="e.g. AICE-COT-FZ-2026-118"
+                    placeholder="Enter freezer serial or asset number"
                     value={freezerNo}
                     onChange={(e) => setFreezerNo(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs font-mono font-bold"
@@ -244,7 +244,7 @@ const CompleteEquipmentDeliveryModal: React.FC<{
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Marites Villanueva"
+                    placeholder="Enter cashier full name"
                     value={cashierName}
                     onChange={(e) => setCashierName(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs"
@@ -400,15 +400,13 @@ const CompleteEquipmentDeliveryModal: React.FC<{
   );
 };
 
-// ===== 1. DELIVERY STAFF ASSIGNED DELIVERIES (Equipment Onboarding + Customer QR Deliveries + Stock Replenishment Deliveries) =====
+// ===== 1. DELIVERY STAFF ASSIGNED DELIVERIES (Equipment Onboarding + Stock Replenishment Deliveries) =====
 export const DeliveryAssignedView: React.FC = () => {
   const [rows, setRows] = useState<any[]>([]);
-  const [qrDeliveries, setQrDeliveries] = useState<any[]>([]);
   const [equipmentDeliveries, setEquipmentDeliveries] = useState<any[]>([]);
   const [selectedEquipmentApp, setSelectedEquipmentApp] = useState<any | null>(null);
   const [viewingPaperFormApp, setViewingPaperFormApp] = useState<any | null>(null);
   const [sharingId, setSharingId] = useState<number | null>(null);
-  const [sharingQrId, setSharingQrId] = useState<number | null>(null);
   const [proofNotes, setProofNotes] = useState<Record<number, string>>({});
   const [proofFiles, setProofFiles] = useState<Record<number, File | null>>({});
   const [message, setMessage] = useState('');
@@ -416,10 +414,6 @@ export const DeliveryAssignedView: React.FC = () => {
 
   const load = () => {
     api.get('/deliveries?mode=active&limit=50').then((res) => setRows(res.data));
-    api
-      .get('/delivery/qr-orders?mode=active')
-      .then((res) => setQrDeliveries(res.data || []))
-      .catch(() => {});
     api
       .get('/franchisee-applications?all_for_delivery=1')
       .then((res) => setEquipmentDeliveries(res.data || []))
@@ -462,70 +456,6 @@ export const DeliveryAssignedView: React.FC = () => {
     const timer = setInterval(publishLocation, 4000);
     return () => clearInterval(timer);
   }, [sharingId, rows]);
-
-  // Automatic live location sharing every 4 seconds for an active Customer QR delivery
-  useEffect(() => {
-    if (!sharingQrId) return;
-    const target = qrDeliveries.find((r) => r.id === sharingQrId);
-    if (!target) return;
-
-    const sendQrPing = (lat: number, lng: number) => {
-      api
-        .post(`/delivery/qr-orders/${sharingQrId}/location`, {
-          lat,
-          lng,
-          eta_minutes: 10,
-        })
-        .catch(() => {});
-    };
-
-    const publishQrLocation = () => {
-      const sLat = Number(target.store_lat || 14.6042);
-      const sLng = Number(target.store_lng || 120.9921);
-      const cLat =
-        target.latitude != null
-          ? Number(target.latitude)
-          : target.customer_lat != null
-          ? Number(target.customer_lat)
-          : sLat + 0.003;
-      const cLng =
-        target.longitude != null
-          ? Number(target.longitude)
-          : target.customer_lng != null
-          ? Number(target.customer_lng)
-          : sLng + 0.003;
-      const midLat = (sLat + cLat) / 2;
-      const midLng = (sLng + cLng) / 2;
-      sendQrPing(
-        Number((midLat + (Math.random() - 0.5) * 0.001).toFixed(7)),
-        Number((midLng + (Math.random() - 0.5) * 0.001).toFixed(7))
-      );
-    };
-
-    publishQrLocation();
-    const timer = setInterval(publishQrLocation, 4000);
-    return () => clearInterval(timer);
-  }, [sharingQrId, qrDeliveries]);
-
-  const updateQrDeliveryStatus = async (qrOrder: any, nextStatus: string) => {
-    setError('');
-    setMessage('');
-    try {
-      await api.patch(`/delivery/qr-orders/${qrOrder.id}/status`, {
-        status: nextStatus,
-      });
-      setMessage(`Customer QR Order ${qrOrder.order_no} marked as ${nextStatus}.`);
-      if (nextStatus === 'Out for Delivery') {
-        setSharingQrId(qrOrder.id);
-      }
-      if (nextStatus === 'Delivered' && sharingQrId === qrOrder.id) {
-        setSharingQrId(null);
-      }
-      load();
-    } catch (err: any) {
-      setError(err.message || 'Failed to update customer QR delivery status.');
-    }
-  };
 
   const updateStatus = async (delivery: any, nextStatus: string) => {
     setError('');
@@ -626,8 +556,8 @@ export const DeliveryAssignedView: React.FC = () => {
                       <ApplicationStatusBadge status={app.status} />
                     </div>
                     <div className="text-xs text-slate-700">
-                      Applicant / Owner: <strong>{app.complete_name}</strong> · Sales Agent:{' '}
-                      <strong>{app.agent_name}</strong>
+                      Applicant / Owner: <strong>{app.complete_name || 'User'}</strong> · Sales Agent:{' '}
+                      <strong>{app.agent_name || 'User'}</strong>
                     </div>
                     <div className="text-xs text-slate-700">
                       Delivery Address: <strong>{app.full_address}</strong>
@@ -713,123 +643,6 @@ export const DeliveryAssignedView: React.FC = () => {
                 </div>
               ))}
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* ===== CUSTOMER QR STORE DELIVERIES ===== */}
-      <div className="space-y-4 pt-4 border-t border-slate-200">
-        <div>
-          <h2 className="text-base font-bold text-slate-900">
-            Assigned Customer QR Store Deliveries ({qrDeliveries.length})
-          </h2>
-          <p className="text-xs text-slate-600">
-            Pick up customer QR orders from the franchisee store, share live GPS position with the customer's tracking map, and mark as Delivered (Cash on Delivery).
-          </p>
-        </div>
-
-        {qrDeliveries.length === 0 ? (
-          <div className="bg-white border border-slate-200 rounded-lg p-5 text-sm text-slate-500">
-            No active customer QR deliveries assigned to you right now.
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {qrDeliveries.map((qr) => {
-              const isSharingQr = sharingQrId === qr.id;
-              return (
-                <div
-                  key={qr.id}
-                  data-testid={`delivery-qr-order-${qr.order_no}`}
-                  className="bg-white border-2 border-purple-200 rounded-xl p-5 space-y-4"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-sm font-bold text-slate-900">
-                          {qr.order_no}
-                        </span>
-                        <span className="text-slate-400">·</span>
-                        <span className="text-sm font-bold text-purple-900">
-                          {qr.store_name}
-                        </span>
-                        <span className="text-slate-400">·</span>
-                        <StatusText status={qr.status} />
-                        <span className="text-slate-400">·</span>
-                        <span className="font-mono text-xs font-bold text-emerald-800">
-                          Collect COD: PHP {Number(qr.total ?? qr.total_amount ?? 0).toFixed(2)}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-700">
-                        Pickup Store: <strong>{qr.store_name}</strong> ({qr.store_address})
-                      </p>
-                      <p className="text-xs text-slate-700">
-                        Deliver To Customer: <strong>{qr.customer_name}</strong> (
-                        {qr.contact_no || qr.customer_contact}) —{' '}
-                        <strong>{qr.address || qr.delivery_address}</strong>
-                      </p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <a
-                        href={`tel:${qr.contact_no || qr.customer_contact}`}
-                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                      >
-                        Call Customer ({qr.contact_no || qr.customer_contact})
-                      </a>
-                      <a
-                        href={`/track/${qr.order_no}`}
-                        className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                      >
-                        Customer Tracking Map ↗
-                      </a>
-                      <button
-                        type="button"
-                        onClick={() => setSharingQrId(isSharingQr ? null : qr.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
-                          isSharingQr
-                            ? 'bg-emerald-600 text-white hover:bg-emerald-700'
-                            : 'border border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                        }`}
-                      >
-                        {isSharingQr ? 'Live GPS Sharing ON' : 'Share Live GPS'}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-3 border-t border-slate-100">
-                    {(qr.items || []).map((it: any) => (
-                      <div key={it.id} className="flex items-center gap-2.5 text-xs">
-                        <ProductImage imageUrl={it.image_url} alt={it.product_name} thumb />
-                        <div>
-                          <div className="font-semibold text-slate-800">{it.product_name}</div>
-                          <div className="text-slate-500 font-mono">Qty: {it.quantity}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-end gap-2">
-                    {['Preparing', 'Out for Delivery', 'Delivered'].map((st) => (
-                      <button
-                        key={st}
-                        type="button"
-                        data-testid={`rider-qr-status-${st
-                          .toLowerCase()
-                          .replace(/\s+/g, '-')}-${qr.order_no}`}
-                        onClick={() => updateQrDeliveryStatus(qr, st)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
-                          st === 'Delivered'
-                            ? 'bg-emerald-700 text-white hover:bg-emerald-800'
-                            : 'bg-slate-900 text-white hover:bg-slate-800'
-                        }`}
-                      >
-                        Mark {st}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
           </div>
         )}
       </div>
@@ -941,7 +754,7 @@ export const DeliveryAssignedView: React.FC = () => {
                       </label>
                       <input
                         type="text"
-                        placeholder="e.g. Received by store cashier Maria"
+                        placeholder="Enter recipient name and handover notes"
                         value={proofNotes[d.id] || ''}
                         onChange={(e) =>
                           setProofNotes({ ...proofNotes, [d.id]: e.target.value })

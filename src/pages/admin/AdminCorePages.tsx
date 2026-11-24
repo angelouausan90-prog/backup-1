@@ -337,7 +337,7 @@ export const WarehouseSetupView: React.FC<{
       return;
     }
 
-    // 1. Instant local dictionary match for common Philippine / Metro Manila locations
+    // 1. Instant local dictionary match for common Philippine / Cotabato locations
     const localMatch = resolveKnownLocationCoords(query);
     if (localMatch) {
       setForm((prev) => ({ ...prev, lat: localMatch.lat, lng: localMatch.lng }));
@@ -442,7 +442,7 @@ export const WarehouseSetupView: React.FC<{
               id="wh-name"
               type="text"
               required
-              placeholder="e.g. AICE Metro Manila Central Cold Storage"
+              placeholder="Enter warehouse name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-600"
@@ -460,7 +460,7 @@ export const WarehouseSetupView: React.FC<{
               id="wh-address"
               type="text"
               required
-              placeholder="e.g. 410 Quirino Highway, Novaliches, Quezon City"
+              placeholder="Street, barangay, city or municipality"
               value={form.address}
               onChange={(e) => setForm({ ...form, address: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-600"
@@ -479,7 +479,7 @@ export const WarehouseSetupView: React.FC<{
                 id="wh-person"
                 type="text"
                 required
-                placeholder="e.g. Engr. Roberto Lim"
+                placeholder="Enter contact person full name"
                 value={form.contact_person}
                 onChange={(e) => setForm({ ...form, contact_person: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-600"
@@ -493,7 +493,7 @@ export const WarehouseSetupView: React.FC<{
                 id="wh-phone"
                 type="text"
                 required
-                placeholder="e.g. 09178001122"
+                placeholder="09XXXXXXXXX"
                 value={form.contact_number}
                 onChange={(e) => setForm({ ...form, contact_number: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-rose-600"
@@ -672,7 +672,7 @@ export const AgentsManagementView: React.FC = () => {
               id="ag-name"
               type="text"
               required
-              placeholder="e.g. Paolo Villanueva"
+              placeholder="Enter agent full name"
               value={form.full_name}
               onChange={(e) => setForm({ ...form, full_name: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -686,7 +686,7 @@ export const AgentsManagementView: React.FC = () => {
               id="ag-phone"
               type="text"
               required
-              placeholder="e.g. 09178889900"
+              placeholder="09XXXXXXXXX"
               value={form.contact_number}
               onChange={(e) => setForm({ ...form, contact_number: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -700,7 +700,7 @@ export const AgentsManagementView: React.FC = () => {
               id="ag-email"
               type="email"
               required
-              placeholder="e.g. paolo@aicehub.local"
+              placeholder="Enter email address"
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -714,7 +714,7 @@ export const AgentsManagementView: React.FC = () => {
               id="ag-user"
               type="text"
               required
-              placeholder="e.g. agent_paolo"
+              placeholder="Enter account username"
               value={form.username}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono"
@@ -767,10 +767,14 @@ export const AgentsManagementView: React.FC = () => {
               {rows.map((a) => (
                 <tr key={a.agent_id} className="hover:bg-slate-50">
                   <td className="py-2.5 pr-4">
-                    <div className="font-medium text-slate-900">{a.full_name}</div>
+                    <div className="font-medium text-slate-900">
+                      {a.full_name || 'User'}
+                    </div>
                     <div className="text-xs text-slate-500">{a.email}</div>
                   </td>
-                  <td className="py-2.5 pr-4 font-mono text-xs text-slate-800">@{a.username}</td>
+                  <td className="py-2.5 pr-4 font-mono text-xs text-slate-800">
+                    {a.username}
+                  </td>
                   <td className="py-2.5 pr-4 font-mono text-xs text-slate-700">{a.contact_number}</td>
                   <td className="py-2.5 pr-4 text-right font-mono text-xs font-semibold text-slate-900">
                     {a.approved_recruits} / {a.total_recruits} ({a.pending_recruits} pending)
@@ -941,9 +945,16 @@ export const PendingFranchiseesView: React.FC = () => {
 
                 <div className="text-xs text-slate-600 space-y-1">
                   <p>
-                    Applicant: <strong className="text-slate-900">{f.complete_name || f.owner_name}</strong>{' '}
-                    · Username: <span className="font-mono text-blue-700">@{f.username}</span> ·
-                    Applied: <span className="font-mono">{String(f.date_applied || '').slice(0, 10)}</span>
+                    Applicant:{' '}
+                    <strong className="text-slate-900">
+                      {f.complete_name || f.owner_name || 'User'}
+                    </strong>{' '}
+                    · Account ID:{' '}
+                    <span className="font-mono text-blue-700">
+                      {f.username}
+                    </span>{' '}
+                    · Applied:{' '}
+                    <span className="font-mono">{String(f.date_applied || '').slice(0, 10)}</span>
                   </p>
                   <p>
                     Store Address: <strong className="text-slate-800">{f.full_address || f.address}</strong>
@@ -960,7 +971,7 @@ export const PendingFranchiseesView: React.FC = () => {
                   </p>
                   <p className="text-slate-700 italic">Remarks: &ldquo;{f.remarks}&rdquo;</p>
                   <p className="text-xs font-semibold text-blue-800 pt-0.5">
-                    Sales Agent: <strong>{f.agent_name}</strong> (@{f.agent_username})
+                    Sales Agent: <strong>{f.agent_name || 'User'}</strong>
                   </p>
                 </div>
               </div>
@@ -980,7 +991,7 @@ export const PendingFranchiseesView: React.FC = () => {
                     <option value="">-- Select Delivery Staff Rider (Optional on Approve) --</option>
                     {riders.map((r) => (
                       <option key={r.id} value={r.id}>
-                        {r.full_name} (@{r.username} • {r.contact_number})
+                        {r.full_name || 'User'} ({r.contact_number})
                       </option>
                     ))}
                   </select>
@@ -1207,15 +1218,15 @@ export const FranchiseesManagementView: React.FC = () => {
                   </td>
                   <td className="py-3 pr-4">
                     <div className="text-slate-900 font-medium">
-                      {f.complete_name || f.owner_name}
+                      {f.complete_name || f.owner_name || 'User'}
                     </div>
                     <div className="text-xs font-mono text-slate-500">
-                      @{f.username} · {f.contact_number}
+                      {f.username} · {f.contact_number}
                     </div>
                   </td>
                   <td className="py-3 pr-4 text-xs text-slate-700">
                     <div>
-                      Agent: <strong>{f.agent_name}</strong>
+                      Agent: <strong>{f.agent_name || 'User'}</strong>
                     </div>
                     <div className="text-slate-500">
                       Rider: {f.assigned_delivery_name || 'Unassigned'}
@@ -1421,8 +1432,12 @@ export const DeliveryStaffView: React.FC = () => {
             <tbody className="divide-y divide-slate-100">
               {rows.map((u) => (
                 <tr key={u.id} className="hover:bg-slate-50">
-                  <td className="py-2.5 pr-4 font-medium text-slate-900">{u.full_name}</td>
-                  <td className="py-2.5 pr-4 font-mono text-xs text-slate-700">@{u.username}</td>
+                  <td className="py-2.5 pr-4 font-medium text-slate-900">
+                    {u.full_name || 'User'}
+                  </td>
+                  <td className="py-2.5 pr-4 font-mono text-xs text-slate-700">
+                    {u.username}
+                  </td>
                   <td className="py-2.5 pr-4 font-mono text-xs text-slate-700">{u.contact_number}</td>
                   <td className="py-2.5 pr-4 text-right font-mono text-xs">
                     {u.active_deliveries} active · {u.completed_deliveries} completed

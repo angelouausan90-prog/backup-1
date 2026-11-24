@@ -58,7 +58,7 @@ import {
   buildStorePosterQrUrl,
 } from './src/utils/domainRules';
 
-// Initialize schema, seed.sql, and seed_test.sql accounts
+// Initialize database schema and base records
 initDatabase();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'aice_franchise_secret_key_2026';
@@ -233,6 +233,8 @@ function authenticate(req: Request, res: Response, next: NextFunction) {
       return;
     }
 
+    user.full_name = String(user.full_name || '').trim() || 'User';
+
     if (user.role === 'franchisee') {
       const fr = db
         .prepare('SELECT id, status, store_name FROM franchisees WHERE user_id = ?')
@@ -318,7 +320,14 @@ async function startServer() {
     const row = db
       .prepare('SELECT COUNT(*) AS cnt FROM warehouses WHERE is_active = 1')
       .get() as { cnt: number };
-    res.json({ hasWarehouse: row.cnt > 0, warehouseCount: row.cnt });
+    const showTestAccounts =
+      process.env.SHOW_TEST_ACCOUNTS === 'true' ||
+      process.env.VITE_SHOW_TEST_ACCOUNTS === 'true';
+    res.json({
+      hasWarehouse: row.cnt > 0,
+      warehouseCount: row.cnt,
+      showTestAccounts,
+    });
   });
 
   // In-memory rate limiter for /api/public/* (max 90 requests per 60-second window per IP)
@@ -796,7 +805,7 @@ async function startServer() {
       user: {
         id: user.id,
         username: user.username,
-        full_name: user.full_name,
+        full_name: String(user.full_name || '').trim() || 'User',
         email: user.email,
         contact_number: user.contact_number,
         role: user.role,
@@ -2814,7 +2823,7 @@ async function startServer() {
         'FRANCHISEE_REGISTERED',
         'franchisee',
         newFranchiseeId,
-        `Submitted application ${applicationNo} for ${storeName} (@${username})`
+        `Submitted application ${applicationNo} for ${storeName}`
       );
 
       return { newAppId, newFranchiseeId };

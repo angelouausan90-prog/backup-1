@@ -220,10 +220,16 @@ export const AgentRecruitsView: React.FC<{ onNavigate: (path: string) => void }>
                       <ApplicationStatusBadge status={f.status} />
                     </div>
                     <p className="text-xs text-slate-600 mt-1">
-                      Applicant: <strong className="text-slate-900">{f.complete_name || f.owner_name}</strong> •
-                      Account: <span className="font-mono text-blue-700">@{f.username}</span> •
-                      Contact: <span className="font-mono">{f.contact_number}</span> •
-                      Date Applied: <span className="font-mono">{String(f.date_applied || '').slice(0, 10)}</span>
+                      Applicant:{' '}
+                      <strong className="text-slate-900">
+                        {f.complete_name || f.owner_name || 'User'}
+                      </strong>{' '}
+                      • Account ID:{' '}
+                      <span className="font-mono text-blue-700">
+                        {f.username}
+                      </span>{' '}
+                      • Contact: <span className="font-mono">{f.contact_number}</span> • Date
+                      Applied: <span className="font-mono">{String(f.date_applied || '').slice(0, 10)}</span>
                     </p>
                     <p className="text-xs text-slate-500 mt-0.5">
                       Address: {f.full_address || f.address}{' '}
@@ -653,7 +659,7 @@ export const RegisterFranchiseeView: React.FC = () => {
           type: 'success',
           text:
             res.message ||
-            `Application ${res.applicationNo} registered (@${res.generatedUsername})!`,
+            `Application ${res.applicationNo} registered!`,
         });
       }
     } catch (err: any) {
@@ -741,7 +747,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                 Applicant: <strong>{submittedRecord.complete_name}</strong> • Auto-Generated
                 Franchisee Username:{' '}
                 <strong className="font-mono text-blue-800 bg-white px-2 py-0.5 rounded border border-blue-200">
-                  @{submittedRecord.username}
+                  {submittedRecord.username}
                 </strong>
               </p>
               <p className="text-xs text-emerald-900 mt-1">
@@ -882,7 +888,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Abdulrahman"
+                    placeholder="Enter first name"
                     value={form.first_name}
                     onChange={(e) => updateField('first_name', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -900,7 +906,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. K."
+                    placeholder="Middle name or initial"
                     value={form.middle_name}
                     onChange={(e) => updateField('middle_name', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -913,7 +919,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g.Midtimbang"
+                    placeholder="Enter last name"
                     value={form.last_name}
                     onChange={(e) => updateField('last_name', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -933,7 +939,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. AICE Awang Cotabato Supermart"
+                    placeholder="Enter store name"
                     value={form.store_name}
                     onChange={(e) => updateField('store_name', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -951,7 +957,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="0917XXXXXXX or +63917XXXXXXX"
+                    placeholder="09XXXXXXXXX"
                     value={form.contact_number}
                     onChange={(e) => updateField('contact_number', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono"
@@ -971,7 +977,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. fb.com/store.cotabato"
+                    placeholder="Facebook profile or page link"
                     value={form.facebook_account}
                     onChange={(e) => updateField('facebook_account', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -989,7 +995,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="email"
-                    placeholder="e.g. owner@store.ph"
+                    placeholder="Enter email address"
                     value={form.email}
                     onChange={(e) => updateField('email', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1044,7 +1050,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                 <div>
                   <span className="text-slate-500">Auto-Derived Username Pattern:</span>{' '}
                   <code className="font-mono font-bold text-blue-700">
-                    @{derivedUsernamePreview}
+                    {derivedUsernamePreview}
                   </code>
                 </div>
               </div>
@@ -1082,7 +1088,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Sinsuat Avenue, Purok 3"
+                    placeholder="Street, building or purok"
                     value={form.street}
                     onChange={(e) => updateField('street', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1098,7 +1104,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Rosary Heights VII"
+                    placeholder="Enter barangay"
                     value={form.barangay}
                     onChange={(e) => updateField('barangay', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1114,7 +1120,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Cotabato City"
+                    placeholder="Enter city or municipality"
                     value={form.city_municipality}
                     onChange={(e) => updateField('city_municipality', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1132,7 +1138,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Maguindanao del Norte"
+                    placeholder="Enter province"
                     value={form.province}
                     onChange={(e) => updateField('province', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1150,7 +1156,7 @@ export const RegisterFranchiseeView: React.FC = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Across Notre Dame University Main Gate"
+                    placeholder="Nearest landmark or cross street"
                     value={form.landmark}
                     onChange={(e) => updateField('landmark', e.target.value)}
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"

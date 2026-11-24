@@ -144,12 +144,12 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({
     if (!mapInstanceRef.current) {
       const defaultCenter: [number, number] =
         stores.length > 0
-          ? [Number(stores[0].lat) || 14.6042, Number(stores[0].lng) || 120.9921]
-          : [14.5995, 120.9842];
+          ? [Number(stores[0].lat) || 7.2236, Number(stores[0].lng) || 124.2464]
+          : [7.2236, 124.2464];
 
       const map = L.map(mapContainerRef.current, {
         center: defaultCenter,
-        zoom: 12,
+        zoom: 13,
         scrollWheelZoom: false,
       });
 

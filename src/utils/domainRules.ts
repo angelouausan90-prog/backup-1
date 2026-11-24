@@ -257,16 +257,45 @@ export function calculateDemandForecast(
   }));
 }
 
+export const COTABATO_CITY_COORDS = {
+  lat: 7.2236,
+  lng: 124.2464,
+} as const;
+
 const KNOWN_PH_LOCATIONS: { keywords: string[]; label: string; lat: number; lng: number }[] = [
-  { keywords: ['quezon city', 'mindanao ave', 'novaliches', 'cubao'], label: 'Quezon City', lat: 14.676, lng: 121.0437 },
-  { keywords: ['makati', 'ayala', 'buendia'], label: 'Makati City', lat: 14.5547, lng: 121.0244 },
-  { keywords: ['taguig', 'bgc', 'bonifacio'], label: 'Taguig City', lat: 14.5176, lng: 121.0509 },
-  { keywords: ['manila', 'sampaloc', 'ermita', 'tondo', 'binondo'], label: 'Manila', lat: 14.5995, lng: 120.9842 },
-  { keywords: ['pasig', 'ortigas', 'kapitolyo'], label: 'Pasig City', lat: 14.5764, lng: 121.0851 },
-  { keywords: ['mandaluyong', 'shaw', 'edsa'], label: 'Mandaluyong City', lat: 14.5794, lng: 121.0359 },
-  { keywords: ['pasay', 'taft', 'moa'], label: 'Pasay City', lat: 14.5378, lng: 121.0014 },
-  { keywords: ['caloocan', 'monumento'], label: 'Caloocan City', lat: 14.657, lng: 120.9842 },
-  { keywords: ['paranaque', 'sucat', 'bicutan'], label: 'Parañaque City', lat: 14.4793, lng: 121.0198 },
+  {
+    keywords: ['cotabato', 'sinsuat', 'rosary heights', 'poblacion', 'notre dame', 'tamontaka', 'esteros'],
+    label: 'Cotabato City',
+    lat: 7.2236,
+    lng: 124.2464,
+  },
+  {
+    keywords: ['awang', 'datu odin sinsuat', 'dalican'],
+    label: 'Datu Odin Sinsuat, Maguindanao del Norte',
+    lat: 7.1812,
+    lng: 124.2294,
+  },
+  {
+    keywords: ['sultan kudarat', 'bulalo', 'salimbao'],
+    label: 'Sultan Kudarat, Maguindanao del Norte',
+    lat: 7.2692,
+    lng: 124.2361,
+  },
+  {
+    keywords: ['parang', 'polloc'],
+    label: 'Parang, Maguindanao del Norte',
+    lat: 7.3728,
+    lng: 124.2678,
+  },
+  {
+    keywords: ['kabuntalan'],
+    label: 'Kabuntalan, Maguindanao del Norte',
+    lat: 7.1206,
+    lng: 124.3831,
+  },
+  { keywords: ['midsayap'], label: 'Midsayap, Cotabato', lat: 7.1903, lng: 124.5317 },
+  { keywords: ['kidapawan'], label: 'Kidapawan City', lat: 7.0083, lng: 125.0894 },
+  { keywords: ['general santos', 'gensan'], label: 'General Santos City', lat: 6.1164, lng: 125.1716 },
   { keywords: ['cebu'], label: 'Cebu City', lat: 10.3157, lng: 123.8854 },
   { keywords: ['davao'], label: 'Davao City', lat: 7.1907, lng: 125.4553 },
 ];
@@ -1365,11 +1394,11 @@ export function sanitizePublicText(input: unknown): string {
 /**
  * Extracts only the general district/city area from a full street address so private street/building numbers
  * are never exposed on public endpoints.
- * Example: "124 Espana Blvd, Sampaloc, Manila" -> "Sampaloc, Manila"
+ * Converts "102 Sinsuat Ave, Rosary Heights VII, Cotabato City" -> "Rosary Heights VII, Cotabato City"
  */
 export function extractGeneralAreaFromAddress(fullAddress: string | null | undefined): string {
   const clean = sanitizePublicText(fullAddress);
-  if (!clean) return 'Metro Manila';
+  if (!clean) return 'Cotabato City';
 
   const parts = clean
     .split(',')
@@ -1380,7 +1409,7 @@ export function extractGeneralAreaFromAddress(fullAddress: string | null | undef
     // Drop the street-level first segment and keep the last 1–2 district/city segments
     const areaSegments = parts.slice(-2).map((seg) => seg.replace(/^\d+\s+/, '').trim());
     const joined = areaSegments.filter(Boolean).join(', ');
-    return joined || 'Metro Manila';
+    return joined || 'Cotabato City';
   }
 
   // Single segment: strip any leading house/building numbers and street words
@@ -1388,7 +1417,7 @@ export function extractGeneralAreaFromAddress(fullAddress: string | null | undef
     .replace(/^\d+[A-Za-z-]*\s+/, '')
     .replace(/\b(St\.?|Street|Ave\.?|Avenue|Blvd\.?|Boulevard|Rd\.?|Road)\b/gi, '')
     .trim();
-  return stripped || 'Metro Manila';
+  return stripped || 'Cotabato City';
 }
 
 export interface PublicProductItem {
@@ -2025,7 +2054,7 @@ export function validateFranchiseeStep1(
   if (!String(input.contact_number || '').trim()) {
     errors.contact_number = 'Contact number is required.';
   } else if (!isValidPhMobileNumber(input.contact_number)) {
-    errors.contact_number = 'Enter a valid PH mobile number (e.g. 09171234567 or +639171234567).';
+    errors.contact_number = 'Enter a valid PH mobile number (09XXXXXXXXX or +639XXXXXXXXX).';
   }
 
   const emailStr = String(input.email || '').trim();
@@ -2187,5 +2216,51 @@ export function resolveFranchiseeQrRouteAccess(
   };
 }
 
+// ===== ROLE LABEL & SIDEBAR FOOTER HELPERS =====
 
+/**
+ * Maps internal role identifiers to clean, user-facing role labels:
+ * - 'admin' -> 'Administrator'
+ * - 'agent' -> 'Sales Agent'
+ * - 'franchisee' -> 'Franchisee'
+ * - 'delivery' -> 'Delivery Rider'
+ */
+export function formatRoleDisplayLabel(role: string | null | undefined): string {
+  const normalized = String(role || '').trim().toLowerCase();
+  switch (normalized) {
+    case 'admin':
+      return 'Administrator';
+    case 'agent':
+      return 'Sales Agent';
+    case 'franchisee':
+      return 'Franchisee';
+    case 'delivery':
+      return 'Delivery Rider';
+    default:
+      return 'User';
+  }
+}
 
+/**
+ * Formats the Sidebar User Footer lines for any logged-in user:
+ * - primaryName: The person's full_name from the database (neutral fallback 'User' when missing)
+ * - secondaryLabel: For franchisees, their store name (fallback 'Franchisee'); for other roles, clean role label
+ */
+export function formatSidebarUserFooter(user: {
+  full_name?: string | null;
+  role?: string | null;
+  franchisee?: { store_name?: string | null } | null;
+}): { primaryName: string; secondaryLabel: string } {
+  const primaryName = String(user.full_name || '').trim() || 'User';
+  if (String(user.role || '').toLowerCase() === 'franchisee') {
+    const storeName = String(user.franchisee?.store_name || '').trim();
+    return {
+      primaryName,
+      secondaryLabel: storeName || 'Franchisee',
+    };
+  }
+  return {
+    primaryName,
+    secondaryLabel: formatRoleDisplayLabel(user.role),
+  };
+}

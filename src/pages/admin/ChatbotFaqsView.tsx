@@ -338,7 +338,7 @@ export const ChatbotFaqsView: React.FC = () => {
               maxLength={300}
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder="e.g., How can I apply to become an AICE franchisee?"
+              placeholder="Enter frequently asked question"
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
             />
           </div>
@@ -375,7 +375,7 @@ export const ChatbotFaqsView: React.FC = () => {
               maxLength={300}
               value={keywords}
               onChange={(e) => setKeywords(e.target.value)}
-              placeholder="e.g., apply, agent, franchise application, sign up"
+              placeholder="Comma-separated matching keywords"
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
             />
           </div>

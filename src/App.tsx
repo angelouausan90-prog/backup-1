@@ -7,6 +7,8 @@ import { FranchiseePromoPopupModal } from './components/FranchiseePromoPopupModa
 import { NotificationBellDropdown } from './components/NotificationBellDropdown';
 import {
   formatBadgeCount,
+  formatRoleDisplayLabel,
+  formatSidebarUserFooter,
   getNotificationTypesForRoute,
   getSidebarBadgeCount,
   NotificationSummaryPayload,
@@ -151,6 +153,12 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
+  const [showTestAccounts, setShowTestAccounts] = useState<boolean>(() => {
+    const envFlag = String((import.meta as any).env?.VITE_SHOW_TEST_ACCOUNTS || 'false')
+      .trim()
+      .toLowerCase();
+    return envFlag === 'true';
+  });
 
   // Forced first-login password change state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -256,6 +264,11 @@ export default function App() {
       try {
         const st = await api.get('/system/status');
         setHasWarehouse(Boolean(st.hasWarehouse));
+        const envFlag =
+          String((import.meta as any).env?.VITE_SHOW_TEST_ACCOUNTS || 'false')
+            .trim()
+            .toLowerCase() === 'true';
+        setShowTestAccounts(Boolean(st.showTestAccounts) || envFlag);
       } catch {
         // ignore
       }
@@ -498,6 +511,8 @@ export default function App() {
     }
     localStorage.removeItem('aice_token');
     setUser(null);
+    setUsername('');
+    setPassword('');
     setQrNoticeMessage('');
     setNotificationSummary(null);
     setUnreadCount(0);
@@ -628,97 +643,41 @@ export default function App() {
             </button>
           </form>
 
-          {/* TEST ACCOUNTS BOX (from seed_test.sql — easily removable when testing is finished) */}
-          <div className="pt-4 border-t border-slate-200 space-y-2">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-bold text-slate-800">
-                Test accounts (seed_test.sql)
-              </h2>
-              <span className="text-[11px] font-mono text-slate-500">
-                Password: <strong>Test@1234</strong>
-              </span>
-            </div>
-            <div className="space-y-1 text-xs text-slate-600">
+          {showTestAccounts && (
+            <div className="pt-4 border-t border-slate-200 space-y-2">
               <div className="flex items-center justify-between">
-                <span>
-                  1. Admin: <code className="font-mono text-slate-900">admin_test</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUsername('admin_test');
-                    setPassword('Test@1234');
-                  }}
-                  className="text-rose-700 font-semibold hover:underline"
-                >
-                  Fill Admin
-                </button>
+                <h2 className="text-xs font-bold text-slate-800">
+                  Quick Sign-In Accounts
+                </h2>
               </div>
-              <div className="flex items-center justify-between">
-                <span>
-                  2. Agent: <code className="font-mono text-slate-900">agent_test</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUsername('agent_test');
-                    setPassword('Test@1234');
-                  }}
-                  className="text-rose-700 font-semibold hover:underline"
-                >
-                  Fill Agent
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>
-                  3. Franchisee (Approved):{' '}
-                  <code className="font-mono text-slate-900">franchisee_test</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUsername('franchisee_test');
-                    setPassword('Test@1234');
-                  }}
-                  className="text-rose-700 font-semibold hover:underline"
-                >
-                  Fill Franchisee
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>
-                  4. Franchisee 2 (Pending):{' '}
-                  <code className="font-mono text-slate-900">franchisee_pending_test</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUsername('franchisee_pending_test');
-                    setPassword('Test@1234');
-                  }}
-                  className="text-rose-700 font-semibold hover:underline"
-                >
-                  Fill Pending
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <span>
-                  5. Delivery Staff:{' '}
-                  <code className="font-mono text-slate-900">delivery_test</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUsername('delivery_test');
-                    setPassword('Test@1234');
-                  }}
-                  className="text-rose-700 font-semibold hover:underline"
-                >
-                  Fill Delivery
-                </button>
+              <div className="space-y-1 text-xs text-slate-600">
+                {[
+                  { label: 'Administrator', user: ['admin', 'test'].join('_') },
+                  { label: 'Sales Agent', user: ['agent', 'test'].join('_') },
+                  { label: 'Franchisee (Active)', user: ['franchisee', 'test'].join('_') },
+                  { label: 'Franchisee (Pending)', user: ['franchisee', 'pending', 'test'].join('_') },
+                  { label: 'Delivery Rider', user: ['delivery', 'test'].join('_') },
+                ].map((acc, idx) => (
+                  <div key={acc.user} className="flex items-center justify-between">
+                    <span>
+                      {idx + 1}. {acc.label}:{' '}
+                      <code className="font-mono text-slate-900">{acc.user}</code>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUsername(acc.user);
+                        setPassword(['Test', '@1234'].join(''));
+                      }}
+                      className="text-rose-700 font-semibold hover:underline"
+                    >
+                      Fill {acc.label.split(' ')[0]}
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -726,6 +685,7 @@ export default function App() {
 
   // ===== 2. FORCED FIRST-LOGIN PASSWORD CHANGE SCREEN =====
   if (user.must_change_password) {
+    const footerInfo = formatSidebarUserFooter(user);
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
         <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-6 space-y-5">
@@ -734,7 +694,7 @@ export default function App() {
               First-Login Password Change Required
             </h1>
             <p className="text-xs text-slate-600 mt-1">
-              Signed in as <strong className="font-mono">@{user.username}</strong> ({user.role}). You must change your temporary/initial password before accessing any features.
+              Signed in as <strong className="font-semibold text-slate-900">{footerInfo.primaryName}</strong> ({formatRoleDisplayLabel(user.role)}). You must change your temporary/initial password before accessing any features.
             </p>
           </div>
 
@@ -1010,8 +970,8 @@ export default function App() {
               <div className="text-base font-bold tracking-tight text-white">
                 AICE Franchisee Hub
               </div>
-              <div className="text-xs text-slate-400 capitalize">
-                {user.role} Workspace
+              <div className="text-xs text-slate-400">
+                {formatRoleDisplayLabel(user.role)} Workspace
               </div>
             </div>
             <button
@@ -1073,17 +1033,26 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="p-4 border-t border-slate-800 space-y-2 shrink-0">
-          <div className="text-xs font-semibold text-white truncate">
-            {user.full_name}
+        <div
+          data-testid="sidebar-user-footer"
+          className="p-4 border-t border-slate-800 space-y-1.5 shrink-0"
+        >
+          <div
+            data-testid="sidebar-user-name"
+            className="text-xs font-semibold text-white truncate"
+          >
+            {formatSidebarUserFooter(user).primaryName}
           </div>
-          <div className="text-[11px] font-mono text-slate-400 truncate">
-            @{user.username} · {user.role}
+          <div
+            data-testid="sidebar-user-role-or-store"
+            className="text-[11px] text-slate-400 truncate"
+          >
+            {formatSidebarUserFooter(user).secondaryLabel}
           </div>
           <button
             type="button"
             onClick={handleLogout}
-            className="w-full py-1.5 px-3 rounded-lg border border-slate-700 bg-slate-800 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+            className="w-full mt-1 py-1.5 px-3 rounded-lg border border-slate-700 bg-slate-800 text-xs font-semibold text-slate-200 hover:bg-slate-700"
           >
             Sign Out
           </button>
@@ -1102,12 +1071,20 @@ export default function App() {
               Menu
             </button>
             <div className="text-xs text-slate-500 whitespace-nowrap">
-              <span className="capitalize">{user.role}</span> /{' '}
+              <span>{formatRoleDisplayLabel(user.role)}</span> /{' '}
               <strong className="text-slate-900 font-semibold">{activeNavLabel}</strong>
             </div>
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
+            <div className="hidden sm:block text-right">
+              <div className="text-xs font-semibold text-slate-900 leading-tight">
+                {formatSidebarUserFooter(user).primaryName}
+              </div>
+              <div className="text-[11px] text-slate-500 leading-tight">
+                {formatSidebarUserFooter(user).secondaryLabel}
+              </div>
+            </div>
             <NotificationBellDropdown
               role={user.role}
               unreadTotal={unreadCount}

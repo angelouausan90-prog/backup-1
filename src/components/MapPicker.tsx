@@ -90,22 +90,6 @@ export const MapPicker: React.FC<MapPickerProps> = ({
             <span className="text-amber-700 font-medium">· No location pinned yet</span>
           )}
         </span>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onPick(14.5995, 120.9842)}
-            className="px-2.5 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 font-medium whitespace-nowrap shrink-0"
-          >
-            Pin Manila Hub (14.5995, 120.9842)
-          </button>
-          <button
-            type="button"
-            onClick={() => onPick(14.6507, 121.0494)}
-            className="px-2.5 py-1 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 font-medium whitespace-nowrap shrink-0"
-          >
-            Pin QC North (14.6507, 121.0494)
-          </button>
-        </div>
       </div>
     </div>
   );

@@ -30,10 +30,10 @@ export const StoreMapView: React.FC<{ user: User }> = ({ user }) => {
 
     const first = data.myStore || data.warehouses[0] || data.stores[0];
     const center: [number, number] = first
-      ? [Number(first.lat), Number(first.lng)]
-      : [14.5995, 120.9842];
+      ? [Number(first.lat) || 7.2236, Number(first.lng) || 124.2464]
+      : [7.2236, 124.2464];
 
-    const map = L.map(mapDiv.current).setView(center, 12);
+    const map = L.map(mapDiv.current).setView(center, 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
     }).addTo(map);

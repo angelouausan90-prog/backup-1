@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
-import { formatPromoHowItWorks, validatePromoPayload } from '../../utils/domainRules';
+import {
+  formatPromoHowItWorks,
+  validatePromoPayload,
+} from '../../utils/domainRules';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
@@ -190,7 +193,7 @@ export const ProductsManagementView: React.FC = () => {
             <input
               type="text"
               aria-label="New category name"
-              placeholder="e.g. Stick, Cone, Cup, Mochi"
+              placeholder="Enter category name"
               value={newCategoryName}
               onChange={(e) => setNewCategoryName(e.target.value)}
               className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 text-sm"
@@ -266,7 +269,7 @@ export const ProductsManagementView: React.FC = () => {
                 id="prod-sku"
                 type="text"
                 required
-                placeholder="e.g. AICE-WATERMELON-65"
+                placeholder="Enter SKU code"
                 value={form.sku}
                 onChange={(e) => setForm({ ...form, sku: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono"
@@ -280,7 +283,7 @@ export const ProductsManagementView: React.FC = () => {
                 id="prod-name"
                 type="text"
                 required
-                placeholder="e.g. AICE Watermelon Stick (Box of 40)"
+                placeholder="Enter product name"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -297,7 +300,7 @@ export const ProductsManagementView: React.FC = () => {
                 id="prod-flavor"
                 type="text"
                 required
-                placeholder="e.g. Watermelon"
+                placeholder="Enter flavor"
                 value={form.flavor}
                 onChange={(e) => setForm({ ...form, flavor: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -311,7 +314,7 @@ export const ProductsManagementView: React.FC = () => {
                 id="prod-size"
                 type="text"
                 required
-                placeholder="e.g. 65ml x 40 pcs"
+                placeholder="Enter pack size or volume"
                 value={form.size}
                 onChange={(e) => setForm({ ...form, size: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -326,7 +329,7 @@ export const ProductsManagementView: React.FC = () => {
                 type="number"
                 step="0.01"
                 required
-                placeholder="e.g. 480.00"
+                placeholder="0.00"
                 value={form.price}
                 onChange={(e) => setForm({ ...form, price: e.target.value })}
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono"
@@ -1001,7 +1004,7 @@ export const AdminOrdersView: React.FC<{ onTrackOrder: (orderId: number) => void
                         <option value="">Select Delivery Rider...</option>
                         {riders.map((r) => (
                           <option key={r.id} value={r.id}>
-                            {r.full_name} (@{r.username})
+                            {r.full_name || 'User'}
                           </option>
                         ))}
                       </select>
@@ -1102,7 +1105,7 @@ export const CommissionsManagementView: React.FC = () => {
             <option value="">Select Agent...</option>
             {agents.map((a) => (
               <option key={a.agent_id} value={a.agent_id}>
-                {a.full_name} ({a.approved_recruits} approved / {a.total_recruits} recruits)
+                {a.full_name || 'User'} ({a.approved_recruits} approved / {a.total_recruits} recruits)
               </option>
             ))}
           </select>
@@ -1118,7 +1121,7 @@ export const CommissionsManagementView: React.FC = () => {
           <input
             type="text"
             required
-            placeholder="Period (e.g. November 2026)"
+            placeholder="Enter commission period"
             value={form.period_label}
             onChange={(e) => setForm({ ...form, period_label: e.target.value })}
             className="px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -1173,7 +1176,7 @@ export const CommissionsManagementView: React.FC = () => {
                 rows.map((c) => (
                   <tr key={c.id} className="hover:bg-slate-50">
                     <td className="py-2.5 pr-4 font-medium text-slate-900">
-                      {c.agent_name} <span className="font-mono text-xs text-slate-500">(@{c.agent_username})</span>
+                      {c.agent_name || 'User'}
                     </td>
                     <td className="py-2.5 pr-4 text-slate-700">{c.period_label}</td>
                     <td className="py-2.5 pr-4 text-right font-mono text-xs">{c.recruits_count}</td>
@@ -1372,13 +1375,6 @@ export const ReportsAndLogsView: React.FC = () => {
                     <tr key={idx}>
                       <td className="py-2 pr-3 font-mono font-semibold">
                         <div>{s.order_number}</div>
-                        <span
-                          className={`inline-block text-[10px] font-bold uppercase ${
-                            s.source === 'QR' ? 'text-purple-700' : 'text-slate-500'
-                          }`}
-                        >
-                          Source: {s.source || 'Replenishment'}
-                        </span>
                       </td>
                       <td className="py-2 pr-3">
                         <div>{s.store_name}</div>
@@ -1498,7 +1494,7 @@ export const ReportsAndLogsView: React.FC = () => {
                 <tr key={l.id} className="hover:bg-slate-50">
                   <td className="py-2 pr-4 font-mono text-slate-500">{l.created_at}</td>
                   <td className="py-2 pr-4 font-medium text-slate-800">
-                    {l.full_name || 'System'} {l.username ? `(@${l.username})` : ''}
+                    {l.full_name || 'System'}
                   </td>
                   <td className="py-2 pr-4 font-mono font-semibold text-slate-900">{l.action}</td>
                   <td className="py-2 pr-4 font-mono text-slate-600">
@@ -2591,46 +2587,6 @@ export const SalesAnalyticsView: React.FC<{
             </div>
           </div>
 
-          {/* Revenue by Order Source Breakdown (Replenishment vs Customer QR Orders) */}
-          {Array.isArray(data?.salesBySource) && data.salesBySource.length > 0 && (
-            <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Sales Analytics by Order Source (Replenishment vs Customer QR)
-                </h2>
-                <p className="text-xs text-slate-600">
-                  Confirmed/Accepted and Delivered customer QR orders are tagged with{' '}
-                  <code className="font-mono font-bold text-purple-800">source = 'QR'</code> and included in real-time sales analytics.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-4 text-xs">
-                {data.salesBySource.map((src: any) => (
-                  <div
-                    key={src.source}
-                    data-testid={`analytics-source-${src.source}`}
-                    className="px-3.5 py-2 rounded-lg border border-slate-200 bg-slate-50 flex items-center gap-3"
-                  >
-                    <span
-                      className={`font-mono font-bold uppercase ${
-                        src.source === 'QR' ? 'text-purple-800' : 'text-slate-900'
-                      }`}
-                    >
-                      source = '{src.source}'
-                    </span>
-                    <span className="text-slate-400">·</span>
-                    <span className="font-mono text-slate-700">
-                      <strong>{src.counted_orders ?? src.orders_count ?? 0}</strong> orders
-                    </span>
-                    <span className="text-slate-400">·</span>
-                    <span className="font-mono font-bold text-emerald-800">
-                      {formatPhp(src.total_revenue ?? src.revenue ?? 0)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* 3. Revenue Over Time + 5. Sales by Category */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* Revenue Over Time Chart (7 cols) */}
@@ -3079,7 +3035,7 @@ export const SalesAnalyticsView: React.FC<{
                               {f.store_name}
                             </div>
                             <div className="text-[11px] text-slate-500">
-                              {f.owner_name} (@{f.username})
+                              {f.owner_name || 'User'}
                             </div>
                           </td>
                           <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-slate-700">
@@ -3127,10 +3083,10 @@ export const SalesAnalyticsView: React.FC<{
                         <tr key={ag.agent_id} className="hover:bg-slate-50">
                           <td className="py-2.5 pr-3">
                             <div className="font-semibold text-slate-900">
-                              {ag.agent_name}
+                              {ag.agent_name || 'User'}
                             </div>
                             <div className="text-[11px] font-mono text-slate-500">
-                              @{ag.agent_username}
+                              {ag.agent_username}
                             </div>
                           </td>
                           <td className="py-2.5 pr-3 text-right font-mono tabular-nums text-slate-700">
@@ -3525,7 +3481,7 @@ export const PromotionsManagementView: React.FC = () => {
               id="promo-name"
               type="text"
               required
-              placeholder="e.g. Summer Bulk Replenishment Promo"
+              placeholder="Enter promotion name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -3572,7 +3528,7 @@ export const PromotionsManagementView: React.FC = () => {
           <input
             id="promo-desc"
             type="text"
-            placeholder="e.g. Stock up on top-selling AICE cartons and save automatically on your order."
+            placeholder="Enter promotion terms or summary note for franchisees"
             value={form.description}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
             className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm"
@@ -3594,7 +3550,7 @@ export const PromotionsManagementView: React.FC = () => {
                     onChange={(e) => setForm({ ...form, tier_basis: e.target.value as any })}
                     className="ml-2 px-2.5 py-1 rounded border border-slate-300 bg-white text-xs"
                   >
-                    <option value="quantity">By Box Quantity (e.g. 10 boxes, 20 boxes)</option>
+                    <option value="quantity">By Box Quantity</option>
                     <option value="amount">By Order Amount (PHP)</option>
                   </select>
                 </label>
