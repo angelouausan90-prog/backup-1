@@ -2,18 +2,33 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
-import { seedDemoData } from './seed_demo';
+import { seedDemoData } from './seed_demo.ts';
 
-const dataDir = path.resolve(process.cwd(), 'server', 'data');
-fs.mkdirSync(dataDir, { recursive: true });
+const isProductionRuntime =
+  process.env.NODE_ENV === 'production' ||
+  Boolean(process.env.K_SERVICE) ||
+  Boolean(process.argv[1]?.replace(/\\/g, '/').endsWith('dist/server.js'));
 
-const dbPath = path.join(dataDir, 'aice_franchise_system.sqlite');
+const defaultDbPath = isProductionRuntime
+  ? '/tmp/aice.db'
+  : path.resolve(process.cwd(), 'server', 'data', 'aice_franchise_system.sqlite');
+
+export const dbPath = (process.env.DB_PATH || '').trim()
+  ? path.resolve((process.env.DB_PATH || '').trim())
+  : defaultDbPath;
+
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
 const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+let dbInitialized = false;
+
 export function initDatabase() {
+  if (dbInitialized) return;
+  dbInitialized = true;
   db.exec(`
     CREATE TABLE IF NOT EXISTS roles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -572,8 +587,8 @@ export function initDatabase() {
   db.prepare("DELETE FROM roles WHERE id = 5 OR name = 'customer'").run();
 
   // Seed or update the real default Admin account (username "admin")
-  // Password is set from ADMIN_INITIAL_PASSWORD and must be changed at first login (must_change_password = 1, is_test = 0)
-  const adminInitialPassword = (process.env.ADMIN_INITIAL_PASSWORD || '').trim();
+  // Password is set from ADMIN_INITIAL_PASSWORD (defaults to Admin@1234 if unset) and must be changed at first login (must_change_password = 1, is_test = 0)
+  const adminInitialPassword = (process.env.ADMIN_INITIAL_PASSWORD || '').trim() || 'Admin@1234';
   const existingAdmin = db
     .prepare(
       "SELECT id, password_hash, must_change_password, is_test FROM users WHERE username = 'admin'"
@@ -592,14 +607,19 @@ export function initDatabase() {
       VALUES (1, 'admin', ?, 'System Administrator', 'admin@aicecotabato.ph', '09170000001', 1, 1, 0)
     `).run(initialHash);
   } else {
-    if (adminInitialPassword) {
+    const hasEmptyPassword = bcrypt.compareSync('', existingAdmin.password_hash);
+    if (
+      (process.env.ADMIN_INITIAL_PASSWORD || '').trim() ||
+      existingAdmin.must_change_password === 1 ||
+      hasEmptyPassword
+    ) {
       const initialHash = bcrypt.hashSync(adminInitialPassword, 10);
       db.prepare(
         "UPDATE users SET password_hash = ?, full_name = 'System Administrator', must_change_password = 1, is_test = 0 WHERE id = ?"
       ).run(initialHash, existingAdmin.id);
-    } else if (existingAdmin.must_change_password === 0 || existingAdmin.is_test !== 0) {
+    } else if (existingAdmin.is_test !== 0) {
       db.prepare(
-        "UPDATE users SET full_name = 'System Administrator', must_change_password = 1, is_test = 0 WHERE id = ?"
+        "UPDATE users SET full_name = 'System Administrator', is_test = 0 WHERE id = ?"
       ).run(existingAdmin.id);
     }
   }

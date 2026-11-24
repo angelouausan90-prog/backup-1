@@ -58,7 +58,7 @@ import {
   formatRoleDisplayLabel,
   formatSidebarUserFooter,
   PromoDefinition,
-} from './domainRules';
+} from './domainRules.ts';
 
 test('haversineKm calculates distance between two Cotabato City coordinates accurately', () => {
   const km = haversineKm(7.2236, 124.2464, 7.1812, 124.2294);

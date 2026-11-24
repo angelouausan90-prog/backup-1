@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -8,7 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import { GoogleGenAI } from '@google/genai';
-import db, { initDatabase } from './server/db';
+import db, { initDatabase } from './server/db.ts';
 import {
   haversineKm,
   estimateEtaMinutes,
@@ -56,20 +55,31 @@ import {
   validateFranchiseeStep2,
   buildFranchiseeOrderQrUrl,
   buildStorePosterQrUrl,
-} from './src/utils/domainRules';
-
-// Initialize database schema and base records
-initDatabase();
+} from './src/utils/domainRules.ts';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'aice_franchise_secret_key_2026';
 
-// Ensure upload directories exist inside server/uploads/products/, proofs/, and stores/
-const productsUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'products');
-const proofsUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'proofs');
-const storesUploadDir = path.resolve(process.cwd(), 'server', 'uploads', 'stores');
-fs.mkdirSync(productsUploadDir, { recursive: true });
-fs.mkdirSync(proofsUploadDir, { recursive: true });
-fs.mkdirSync(storesUploadDir, { recursive: true });
+// Ensure upload directories exist inside a writable path (server/uploads/ or /tmp/uploads/ fallback)
+function resolveWritableUploadsBaseDir(): string {
+  const preferred = path.resolve(process.cwd(), 'server', 'uploads');
+  try {
+    fs.mkdirSync(path.join(preferred, 'products'), { recursive: true });
+    fs.mkdirSync(path.join(preferred, 'proofs'), { recursive: true });
+    fs.mkdirSync(path.join(preferred, 'stores'), { recursive: true });
+    return preferred;
+  } catch {
+    const fallback = path.resolve('/tmp', 'aice_uploads');
+    fs.mkdirSync(path.join(fallback, 'products'), { recursive: true });
+    fs.mkdirSync(path.join(fallback, 'proofs'), { recursive: true });
+    fs.mkdirSync(path.join(fallback, 'stores'), { recursive: true });
+    return fallback;
+  }
+}
+
+const uploadsBaseDir = resolveWritableUploadsBaseDir();
+const productsUploadDir = path.join(uploadsBaseDir, 'products');
+const proofsUploadDir = path.join(uploadsBaseDir, 'proofs');
+const storesUploadDir = path.join(uploadsBaseDir, 'stores');
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
 const ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.webp'];
@@ -104,8 +114,8 @@ const uploadStoreImage = makeUploader(storesUploadDir, 'store');
 
 function deleteUploadedFile(imageUrl: string | null | undefined) {
   if (!imageUrl) return;
-  const rel = imageUrl.replace(/^\//, '');
-  const fullPath = path.resolve(process.cwd(), 'server', rel);
+  const rel = imageUrl.replace(/^\/uploads\//, '').replace(/^\//, '');
+  const fullPath = path.resolve(uploadsBaseDir, rel);
   if (fs.existsSync(fullPath)) {
     try {
       fs.unlinkSync(fullPath);
@@ -306,14 +316,20 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
 
-  // Serve product photos, store photos, and proof of delivery photos statically from server/uploads/
-  app.use('/uploads', express.static(path.resolve(process.cwd(), 'server', 'uploads')));
+  // Serve product photos, store photos, and proof of delivery photos statically
+  app.use('/uploads', express.static(uploadsBaseDir));
 
   const api = express.Router();
 
   // ===== PUBLIC ENDPOINTS =====
   api.get('/health', (_req, res) => {
     res.json({ status: 'ok', service: 'AICE Franchisee Hub API' });
+  });
+
+  // Ensure database tables and base records are initialized before handling any DB-backed API routes
+  api.use((_req, _res, next) => {
+    initDatabase();
+    next();
   });
 
   api.get('/system/status', (_req, res) => {
@@ -5994,7 +6010,13 @@ async function startServer() {
     res.status(500).json({ message: err.message || 'Internal server error.' });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.K_SERVICE) ||
+    Boolean(process.argv[1]?.replace(/\\/g, '/').endsWith('dist/server.js'));
+
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -6008,9 +6030,16 @@ async function startServer() {
     });
   }
 
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`AICE Franchisee Hub running on http://0.0.0.0:${PORT}`);
+    setImmediate(() => {
+      try {
+        initDatabase();
+      } catch (err) {
+        console.error('[DB INIT ERROR]', err);
+      }
+    });
   });
 }
 
