@@ -52,6 +52,7 @@ import {
 } from './pages/delivery/DeliveryPages';
 import { PublicLandingPage } from './pages/public/PublicLandingPage';
 import { ChatbotFaqsView } from './pages/admin/ChatbotFaqsView';
+import { WarehouseRestockingPage } from './pages/admin/WarehouseRestockingPage';
 
 interface NavItem {
   label: string;
@@ -71,6 +72,7 @@ const SIDEBAR_BY_ROLE: Record<RoleName, NavItem[]> = {
     { label: 'Demand Forecasting', path: '/admin/demand-forecast' },
     { label: 'Sales Analytics', path: '/admin/sales-analytics' },
     { label: 'Warehouse Inventory', path: '/admin/inventory' },
+    { label: 'Warehouse Restocking', path: '/admin/restocking' },
     { label: 'Replenishment Orders', path: '/admin/orders' },
     { label: 'Agent Commissions', path: '/admin/commissions' },
     { label: 'Chatbot FAQs', path: '/admin/chatbot-faqs' },
@@ -143,6 +145,7 @@ export default function App() {
   });
   const [qrNoticeMessage, setQrNoticeMessage] = useState<string>('');
   const [trackingOrderId, setTrackingOrderId] = useState<number | null>(null);
+  const [openRestockId, setOpenRestockId] = useState<number | null>(null);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [notificationSummary, setNotificationSummary] =
     useState<NotificationSummaryPayload | null>(null);
@@ -449,6 +452,11 @@ export default function App() {
     }
     syncRouteWithHistory(targetPath);
     markRouteNotificationsRead(user.role, targetPath);
+  };
+
+  const openRestockRequest = (requestId?: number | null) => {
+    setOpenRestockId(requestId ?? null);
+    navigateTo('/admin/restocking');
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -820,7 +828,12 @@ export default function App() {
     switch (activeRoute) {
       // Admin routes
       case '/admin/dashboard':
-        return <AdminDashboard onNavigate={navigateTo} />;
+        return (
+          <AdminDashboard
+            onNavigate={navigateTo}
+            onOpenRestock={openRestockRequest}
+          />
+        );
       case '/admin/warehouses':
         return (
           <WarehouseSetupView
@@ -845,7 +858,15 @@ export default function App() {
       case '/admin/sales-analytics':
         return <SalesAnalyticsView onNavigate={navigateTo} />;
       case '/admin/inventory':
-        return <InventoryManagementView />;
+        return <InventoryManagementView onOpenRestock={openRestockRequest} />;
+      case '/admin/restocking':
+        return (
+          <WarehouseRestockingPage
+            initialRequestId={openRestockId}
+            onRequestConsumed={() => setOpenRestockId(null)}
+            onBadgeRefresh={loadUnreadCount}
+          />
+        );
       case '/admin/orders':
         return <AdminOrdersView onTrackOrder={openTrackOrder} />;
       case '/admin/track-order':

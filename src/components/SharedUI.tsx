@@ -38,15 +38,53 @@ export const ProductImage: React.FC<{
 };
 
 /**
- * StatusText renders clean, unboxed semantic status text (following Zero-Pill metadata discipline & color-blind legibility).
+ * StockStatusBadge renders exact, consistent stock status labels ("In Stock", "Low Stock", "No Stock")
+ * with distinct high-contrast colors (green, orange, red) across inventory, catalog, reports, and restocking.
+ */
+export const StockStatusBadge: React.FC<{ status: string }> = ({ status }) => {
+  const normalized =
+    status === 'No Stock'
+      ? 'No Stock'
+      : status === 'Low Stock'
+      ? 'Low Stock'
+      : 'In Stock';
+
+  const styleMap: Record<string, string> = {
+    'In Stock': 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    'Low Stock': 'bg-orange-100 text-orange-800 border-orange-200',
+    'No Stock': 'bg-rose-100 text-rose-800 border-rose-200',
+  };
+
+  const dotMap: Record<string, string> = {
+    'In Stock': 'bg-emerald-600',
+    'Low Stock': 'bg-orange-500',
+    'No Stock': 'bg-rose-600',
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-semibold whitespace-nowrap ${styleMap[normalized]}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${dotMap[normalized]}`} aria-hidden="true" />
+      {normalized}
+    </span>
+  );
+};
+
+/**
+ * StatusText renders clean semantic status text for orders, applications, and restock workflows.
  */
 export const StatusText: React.FC<{ status: string }> = ({ status }) => {
+  if (status === 'In Stock' || status === 'Low Stock' || status === 'No Stock') {
+    return <StockStatusBadge status={status} />;
+  }
   const colorMap: Record<string, string> = {
     Approved: 'text-emerald-700 font-semibold',
+    'Approved/In Transit': 'text-blue-700 font-semibold',
+    Received: 'text-emerald-700 font-semibold',
     Delivered: 'text-emerald-700 font-semibold',
     Paid: 'text-emerald-700 font-semibold',
     Active: 'text-emerald-700 font-semibold',
-    OK: 'text-emerald-700 font-semibold',
     Pending: 'text-amber-700 font-semibold',
     Placed: 'text-slate-700 font-medium',
     Confirmed: 'text-blue-700 font-semibold',
@@ -56,11 +94,10 @@ export const StatusText: React.FC<{ status: string }> = ({ status }) => {
     'Picked Up': 'text-indigo-700 font-semibold',
     'Out for Delivery': 'text-amber-700 font-semibold',
     'Near / Arrived': 'text-rose-700 font-semibold',
-    LOW: 'text-rose-700 font-semibold',
     Rejected: 'text-rose-700 font-semibold',
     Cancelled: 'text-slate-500 font-medium line-through',
     Inactive: 'text-slate-500 font-medium',
-    Draft: 'text-slate-600 font-semibold',
+    Draft: 'text-amber-800 font-semibold',
     Paused: 'text-amber-700 font-semibold',
     Expired: 'text-slate-500 font-medium',
   };

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import { MapPicker } from '../../components/MapPicker';
-import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
+import { PaginationBar, ProductImage, StatusText, StockStatusBadge } from '../../components/SharedUI';
 import { Warehouse } from '../../types';
 import { resolveKnownLocationCoords } from '../../utils/domainRules';
 import {
@@ -16,9 +16,10 @@ import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 
 // ===== 1. ADMIN DASHBOARD =====
-export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = ({
-  onNavigate,
-}) => {
+export const AdminDashboard: React.FC<{
+  onNavigate: (path: string) => void;
+  onOpenRestock?: (requestId?: number | null) => void;
+}> = ({ onNavigate, onOpenRestock }) => {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState('');
   const [publicSettings, setPublicSettings] = useState({
@@ -146,12 +147,138 @@ export const AdminDashboard: React.FC<{ onNavigate: (path: string) => void }> = 
         </div>
 
         <div className="bg-white border border-slate-200 rounded-lg p-4">
-          <div className="text-xs font-medium text-slate-500">Warehouse Low-Stock Alerts</div>
-          <div className="mt-1 text-2xl font-bold text-amber-700 font-mono tabular-nums">
-            {data.lowStockCount || 0} SKU(s)
+          <div className="text-xs font-medium text-slate-500">Warehouse Restock Alerts</div>
+          <div className="mt-1 flex items-baseline gap-2.5 font-mono tabular-nums">
+            <span className="text-2xl font-bold text-rose-700">{data.noStockCount || 0}</span>
+            <span className="text-xs font-semibold text-rose-700">No Stock</span>
+            <span className="text-2xl font-bold text-orange-600">
+              {data.lowStockOnlyCount ?? Math.max(0, (data.lowStockCount || 0) - (data.noStockCount || 0))}
+            </span>
+            <span className="text-xs font-semibold text-orange-700">Low Stock</span>
           </div>
-          <div className="mt-1 text-xs text-slate-500">At or below threshold</div>
+          <div className="mt-1 flex items-center justify-between text-xs">
+            <span className="text-slate-500">
+              {data.restockSummary?.pending_drafts ?? data.restockSummary?.draft_count ?? 0} draft ·{' '}
+              {data.restockSummary?.in_transit ?? data.restockSummary?.in_transit_count ?? 0} in transit
+            </span>
+            <button
+              type="button"
+              onClick={() => onNavigate('/admin/restocking')}
+              className="font-semibold text-rose-700 hover:underline"
+            >
+              Restock →
+            </button>
+          </div>
         </div>
+      </div>
+
+      {/* Restock Recommendations Section (No Stock First) */}
+      <div
+        data-testid="dashboard-restock-recommendations"
+        className="bg-white border border-slate-200 rounded-lg p-5 space-y-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">Restock Recommendations</h2>
+            <p className="text-xs text-slate-500">
+              Low Stock and No Stock warehouse items prioritized with No Stock first.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate('/admin/restocking')}
+            className="text-xs font-semibold text-rose-700 hover:underline whitespace-nowrap shrink-0"
+          >
+            Open Warehouse Restocking
+          </button>
+        </div>
+
+        {!Array.isArray(data.restockRecommendations) || data.restockRecommendations.length === 0 ? (
+          <p className="text-sm text-emerald-700">
+            All warehouse products are currently In Stock above their reorder points.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-left">
+              <thead>
+                <tr className="border-b border-slate-200 font-semibold text-slate-500">
+                  <th className="py-2 pr-3">Product</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3 text-right">Available Stock</th>
+                  <th className="py-2 pr-3 text-right">Recommended Qty</th>
+                  <th className="py-2 pr-3">Guidance</th>
+                  <th className="py-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {data.restockRecommendations.map((rec: any) => (
+                  <tr
+                    key={`${rec.warehouse_id}-${rec.product_id}`}
+                    className={
+                      rec.stock_status === 'No Stock'
+                        ? 'bg-rose-50/40 hover:bg-rose-50/70'
+                        : 'hover:bg-slate-50'
+                    }
+                  >
+                    <td className="py-2.5 pr-3">
+                      <div className="font-semibold text-slate-900">
+                        {rec.product_name || rec.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {rec.warehouse_name} · <span className="font-mono">{rec.sku}</span>
+                      </div>
+                    </td>
+                    <td className="py-2.5 pr-3">
+                      <StockStatusBadge status={rec.stock_status} />
+                    </td>
+                    <td className="py-2.5 pr-3 text-right font-mono tabular-nums font-semibold text-slate-900">
+                      {rec.available_stock}
+                      <span className="text-[10px] font-normal text-slate-500">
+                        {' '}
+                        / RP {rec.reorder_point}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-right font-mono tabular-nums font-bold text-slate-900">
+                      {rec.suggested_qty}
+                    </td>
+                    <td className="py-2.5 pr-3">
+                      <span
+                        className={`font-semibold ${
+                          rec.stock_status === 'No Stock' ? 'text-rose-700' : 'text-orange-700'
+                        }`}
+                      >
+                        {rec.recommendation_label}
+                      </span>
+                    </td>
+                    <td className="py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onOpenRestock
+                            ? onOpenRestock(
+                                rec.active_restock?.id ?? rec.active_restock?.request_id ?? null
+                              )
+                            : onNavigate('/admin/restocking')
+                        }
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap ${
+                          rec.stock_status === 'No Stock'
+                            ? 'bg-rose-600 text-white hover:bg-rose-700'
+                            : 'bg-slate-900 text-white hover:bg-slate-800'
+                        }`}
+                      >
+                        {rec.active_restock?.status === 'Draft'
+                          ? `Open Draft (${rec.active_restock.request_number})`
+                          : rec.active_restock?.status === 'Approved/In Transit'
+                          ? `View In Transit (${rec.active_restock.request_number})`
+                          : `Open Restocking`}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="bg-white border border-slate-200 rounded-lg p-5">

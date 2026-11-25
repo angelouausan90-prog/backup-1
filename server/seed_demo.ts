@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
+import type { DbExecutor } from './db.ts';
 
 const STANDARD_EQUIPMENT_ITEMS = [
   'Freezer',
@@ -17,201 +17,175 @@ function buildSignatureSvgDataUrl(label: string): string {
 }
 
 /**
- * Seeds optional demo accounts, Cotabato City franchisee stores, applications,
- * and orders ONLY when SEED_DEMO_DATA=true.
- * Login usernames are preserved so existing credentials continue to work.
+ * Seeds optional demo accounts, Cotabato City franchisee stores, and applications
+ * ONLY when SEED_DEMO_DATA=true.
+ * Fully idempotent via ON CONFLICT DO NOTHING so restarts never overwrite data.
  */
-export function seedDemoData(db: Database.Database): void {
-  const demoPasswordHash = bcrypt.hashSync('Test@1234', 10);
+export async function seedDemoData(db: DbExecutor): Promise<void> {
+  const demoPasswordHash = await bcrypt.hash('Test@1234', 10);
 
-  const insertUser = db.prepare(`
-    INSERT OR IGNORE INTO users (
-      role_id, username, password_hash, full_name, email, contact_number,
-      is_active, must_change_password, is_test
-    )
-    VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?)
-  `);
+  const demoUsers: Array<[number, string, string, string, string, number]> = [
+    [1, 'admin_test', 'Ricardo Morales', 'ricardo.morales@aicecotabato.ph', '09171111111', 1],
+    [2, 'agent_test', 'Maria Santos', 'maria.santos@aicecotabato.ph', '09172222222', 1],
+    [3, 'franchisee_test', 'Juan Dela Cruz', 'juan.delacruz@aicecotabato.ph', '09173333333', 1],
+    [3, 'franchisee_pending_test', 'Pedro Reyes', 'pedro.reyes@aicecotabato.ph', '09174444444', 1],
+    [4, 'delivery_test', 'Carlo Mendoza', 'carlo.mendoza@aicecotabato.ph', '09175555555', 1],
+    [
+      3,
+      'franchisee_delivery_test',
+      'Siti Aminah Sinsuat',
+      'siti.sinsuat@aicecotabato.ph',
+      '09176666666',
+      1,
+    ],
+    [
+      3,
+      'franchisee_approved_test',
+      'Ramonito Mangelen',
+      'ramonito.mangelen@aicecotabato.ph',
+      '09177777777',
+      1,
+    ],
+  ];
 
-  insertUser.run(
-    1,
-    'admin_test',
-    demoPasswordHash,
-    'Ricardo Morales',
-    'ricardo.morales@aicecotabato.ph',
-    '09171111111',
-    1
-  );
-  insertUser.run(
-    2,
-    'agent_test',
-    demoPasswordHash,
-    'Maria Santos',
-    'maria.santos@aicecotabato.ph',
-    '09172222222',
-    1
-  );
-  insertUser.run(
-    3,
-    'franchisee_test',
-    demoPasswordHash,
-    'Juan Dela Cruz',
-    'juan.delacruz@aicecotabato.ph',
-    '09173333333',
-    1
-  );
-  insertUser.run(
-    3,
-    'franchisee_pending_test',
-    demoPasswordHash,
-    'Pedro Reyes',
-    'pedro.reyes@aicecotabato.ph',
-    '09174444444',
-    1
-  );
-  insertUser.run(
-    4,
-    'delivery_test',
-    demoPasswordHash,
-    'Carlo Mendoza',
-    'carlo.mendoza@aicecotabato.ph',
-    '09175555555',
-    1
-  );
-  insertUser.run(
-    3,
-    'franchisee_delivery_test',
-    demoPasswordHash,
-    'Siti Aminah Sinsuat',
-    'siti.sinsuat@aicecotabato.ph',
-    '09176666666',
-    1
-  );
-  insertUser.run(
-    3,
-    'franchisee_approved_test',
-    demoPasswordHash,
-    'Ramonito Mangelen',
-    'ramonito.mangelen@aicecotabato.ph',
-    '09177777777',
-    1
-  );
+  for (const [roleId, username, fullName, email, contactNumber, isTest] of demoUsers) {
+    await db.execute(
+      `INSERT INTO users (
+        role_id, username, password_hash, full_name, email, contact_number,
+        is_active, must_change_password, is_test
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, 1, 0, $7)
+      ON CONFLICT (username) DO NOTHING`,
+      [roleId, username, demoPasswordHash, fullName, email, contactNumber, isTest]
+    );
+  }
 
-  const adminUser = db
-    .prepare("SELECT id FROM users WHERE username = 'admin_test'")
-    .get() as { id: number } | undefined;
-  const agentUser = db
-    .prepare("SELECT id FROM users WHERE username = 'agent_test'")
-    .get() as { id: number } | undefined;
-  const deliveryUser = db
-    .prepare("SELECT id FROM users WHERE username = 'delivery_test'")
-    .get() as { id: number } | undefined;
-  const frActiveUser = db
-    .prepare("SELECT id FROM users WHERE username = 'franchisee_test'")
-    .get() as { id: number } | undefined;
-  const frPendingUser = db
-    .prepare("SELECT id FROM users WHERE username = 'franchisee_pending_test'")
-    .get() as { id: number } | undefined;
-  const frForDeliveryUser = db
-    .prepare("SELECT id FROM users WHERE username = 'franchisee_delivery_test'")
-    .get() as { id: number } | undefined;
-  const frApprovedUser = db
-    .prepare("SELECT id FROM users WHERE username = 'franchisee_approved_test'")
-    .get() as { id: number } | undefined;
+  const adminUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'admin_test'"
+  );
+  const agentUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'agent_test'"
+  );
+  const deliveryUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'delivery_test'"
+  );
+  const frActiveUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'franchisee_test'"
+  );
+  const frPendingUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'franchisee_pending_test'"
+  );
+  const frForDeliveryUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'franchisee_delivery_test'"
+  );
+  const frApprovedUser = await db.queryOne<{ id: number }>(
+    "SELECT id FROM users WHERE username = 'franchisee_approved_test'"
+  );
 
   if (agentUser && adminUser) {
-    db.prepare('INSERT OR IGNORE INTO agents (user_id, created_by) VALUES (?, ?)').run(
-      agentUser.id,
-      adminUser.id
+    await db.execute(
+      `INSERT INTO agents (user_id, created_by)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [agentUser.id, adminUser.id]
     );
-    const agentRow = db
-      .prepare('SELECT id FROM agents WHERE user_id = ?')
-      .get(agentUser.id) as { id: number } | undefined;
+    const agentRow = await db.queryOne<{ id: number }>(
+      'SELECT id FROM agents WHERE user_id = $1',
+      [agentUser.id]
+    );
 
     if (agentRow && frActiveUser) {
-      db.prepare(`
-        INSERT OR IGNORE INTO franchisees (
+      await db.execute(
+        `INSERT INTO franchisees (
           user_id, agent_id, owner_name, store_name, address, contact_number,
           lat, lng, status, approved_by, approved_at
         )
         VALUES (
-          ?, ?, 'Juan Dela Cruz', 'AICE Notre Dame Avenue Corner Store',
+          $1, $2, 'Juan Dela Cruz', 'AICE Notre Dame Avenue Corner Store',
           '124 Notre Dame Ave, Brgy. Poblacion VI, Cotabato City, Maguindanao del Norte',
-          '09173333333', 7.2215000, 124.2482000, 'Approved', ?, datetime('now')
+          '09173333333', 7.2215000, 124.2482000, 'Approved', $3, CURRENT_TIMESTAMP
         )
-      `).run(frActiveUser.id, agentRow.id, adminUser.id);
+        ON CONFLICT (user_id) DO NOTHING`,
+        [frActiveUser.id, agentRow.id, adminUser.id]
+      );
     }
 
     if (agentRow && frPendingUser) {
-      db.prepare(`
-        INSERT OR IGNORE INTO franchisees (
+      await db.execute(
+        `INSERT INTO franchisees (
           user_id, agent_id, owner_name, store_name, address, contact_number,
           lat, lng, status
         )
         VALUES (
-          ?, ?, 'Pedro Reyes', 'AICE Awang Supermart',
+          $1, $2, 'Pedro Reyes', 'AICE Awang Supermart',
           '88 Sinsuat Ave, Brgy. Awang, Datu Odin Sinsuat, Maguindanao del Norte',
           '09174444444', 7.1812000, 124.2294000, 'Pending'
         )
-      `).run(frPendingUser.id, agentRow.id);
+        ON CONFLICT (user_id) DO NOTHING`,
+        [frPendingUser.id, agentRow.id]
+      );
     }
 
     if (agentRow && frForDeliveryUser) {
-      db.prepare(`
-        INSERT OR IGNORE INTO franchisees (
+      await db.execute(
+        `INSERT INTO franchisees (
           user_id, agent_id, owner_name, store_name, address, contact_number,
           lat, lng, status, approved_by, approved_at
         )
         VALUES (
-          ?, ?, 'Siti Aminah Sinsuat', 'AICE Cotabato Rosary Heights Mart',
+          $1, $2, 'Siti Aminah Sinsuat', 'AICE Cotabato Rosary Heights Mart',
           '45 Sinsuat Ave, Brgy. Rosary Heights II, Cotabato City, Maguindanao del Norte',
-          '09176666666', 7.2167000, 124.2500000, 'Approved', ?, datetime('now')
+          '09176666666', 7.2167000, 124.2500000, 'Approved', $3, CURRENT_TIMESTAMP
         )
-      `).run(frForDeliveryUser.id, agentRow.id, adminUser.id);
+        ON CONFLICT (user_id) DO NOTHING`,
+        [frForDeliveryUser.id, agentRow.id, adminUser.id]
+      );
     }
 
     if (agentRow && frApprovedUser) {
-      db.prepare(`
-        INSERT OR IGNORE INTO franchisees (
+      await db.execute(
+        `INSERT INTO franchisees (
           user_id, agent_id, owner_name, store_name, address, contact_number,
           lat, lng, status, approved_by, approved_at
         )
         VALUES (
-          ?, ?, 'Ramonito Mangelen', 'AICE Sinsuat Avenue Corner',
+          $1, $2, 'Ramonito Mangelen', 'AICE Sinsuat Avenue Corner',
           '102 Sinsuat Ave, Brgy. Poblacion V, Cotabato City, Maguindanao del Norte',
-          '09177777777', 7.2236000, 124.2464000, 'Approved', ?, datetime('now')
+          '09177777777', 7.2236000, 124.2464000, 'Approved', $3, CURRENT_TIMESTAMP
         )
-      `).run(frApprovedUser.id, agentRow.id, adminUser.id);
+        ON CONFLICT (user_id) DO NOTHING`,
+        [frApprovedUser.id, agentRow.id, adminUser.id]
+      );
     }
   }
 
-  ensureFranchiseeApplicationsAndCodes(db, {
+  await ensureFranchiseeApplicationsAndCodes(db, {
     adminUserId: adminUser?.id || null,
     agentUserId: agentUser?.id || null,
     deliveryUserId: deliveryUser?.id || null,
   });
 }
 
-export function ensureFranchiseeApplicationsAndCodes(
-  db: Database.Database,
+export async function ensureFranchiseeApplicationsAndCodes(
+  db: DbExecutor,
   ids: {
     adminUserId: number | null;
     agentUserId: number | null;
     deliveryUserId: number | null;
   }
-): void {
-  const allFranchisees = db
-    .prepare(
-      `SELECT f.*, u.username, u.email
-       FROM franchisees f
-       JOIN users u ON u.id = f.user_id
-       ORDER BY f.id ASC`
-    )
-    .all() as any[];
+): Promise<void> {
+  const allFranchisees = await db.queryAll<any>(
+    `SELECT f.*, u.username, u.email
+     FROM franchisees f
+     JOIN users u ON u.id = f.user_id
+     ORDER BY f.id ASC`
+  );
 
   for (const fr of allFranchisees) {
-    const existingApp = db
-      .prepare('SELECT id, status FROM franchisee_applications WHERE franchisee_id = ?')
-      .get(fr.id) as { id: number; status: string } | undefined;
+    const existingApp = await db.queryOne<{ id: number; status: string }>(
+      'SELECT id, status FROM franchisee_applications WHERE franchisee_id = $1',
+      [fr.id]
+    );
 
     if (!existingApp) {
       const appNo = `FR-2026-${String(fr.id).padStart(4, '0')}`;
@@ -286,29 +260,29 @@ export function ensureFranchiseeApplicationsAndCodes(
         appStatus = 'Rejected';
       }
 
-      const appRes = db
-        .prepare(
-          `INSERT INTO franchisee_applications (
-            application_no, franchisee_id, user_id, agent_id, date_applied,
-            first_name, middle_name, last_name, complete_name, contact_number,
-            store_name, street, barangay, city_municipality, province, full_address,
-            landmark, facebook_account, email, remarks, lat, lng,
-            status, rejection_reason, approved_by, approved_at,
-            assigned_delivery_user_id, assigned_at, date_delivered, delivered_at, activated_at,
-            cashier_name, collector_name, delivery_team_name, driver_name,
-            customer_printed_name, noted_by_name, freezer_no
-          ) VALUES (
-            ?, ?, ?, ?, date('now'),
-            ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?
-          )`
+      const appRes = await db.queryOne<{ id: number }>(
+        `INSERT INTO franchisee_applications (
+          application_no, franchisee_id, user_id, agent_id, date_applied,
+          first_name, middle_name, last_name, complete_name, contact_number,
+          store_name, street, barangay, city_municipality, province, full_address,
+          landmark, facebook_account, email, remarks, lat, lng,
+          status, rejection_reason, approved_by, approved_at,
+          assigned_delivery_user_id, assigned_at, date_delivered, delivered_at, activated_at,
+          cashier_name, collector_name, delivery_team_name, driver_name,
+          customer_printed_name, noted_by_name, freezer_no
+        ) VALUES (
+          $1, $2, $3, $4, to_char(CURRENT_DATE, 'YYYY-MM-DD'),
+          $5, $6, $7, $8, $9,
+          $10, $11, $12, $13, $14, $15,
+          $16, $17, $18, $19, $20, $21,
+          $22, $23, $24, $25,
+          $26, $27, $28, $29, $30,
+          $31, $32, $33, $34,
+          $35, $36, $37
         )
-        .run(
+        ON CONFLICT (franchisee_id) DO NOTHING
+        RETURNING id`,
+        [
           appNo,
           fr.id,
           fr.user_id,
@@ -345,90 +319,100 @@ export function ensureFranchiseeApplicationsAndCodes(
           driverName,
           customerPrinted,
           notedByName,
-          freezerNo
-        );
-
-      const appId = Number(appRes.lastInsertRowid);
-      const insertEq = db.prepare(
-        `INSERT OR IGNORE INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no)
-         VALUES (?, ?, ?, ?, ?)`
+          freezerNo,
+        ]
       );
 
-      for (const itemName of STANDARD_EQUIPMENT_ITEMS) {
-        if (appStatus === 'Active') {
-          insertEq.run(
-            appId,
-            itemName,
-            'NEW',
-            itemName === 'Baskets' ? 4 : 1,
-            itemName === 'Freezer' ? freezerNo : ''
-          );
-        } else {
-          insertEq.run(appId, itemName, 'NOT_ISSUED', 0, '');
+      if (appRes?.id) {
+        const appId = Number(appRes.id);
+
+        for (const itemName of STANDARD_EQUIPMENT_ITEMS) {
+          if (appStatus === 'Active') {
+            await db.execute(
+              `INSERT INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (application_id, item) DO NOTHING`,
+              [
+                appId,
+                itemName,
+                'NEW',
+                itemName === 'Baskets' ? 4 : 1,
+                itemName === 'Freezer' ? freezerNo : '',
+              ]
+            );
+          } else {
+            await db.execute(
+              `INSERT INTO franchisee_equipment (application_id, item, condition, quantity, freezer_no)
+               VALUES ($1, $2, 'NOT_ISSUED', 0, '')
+               ON CONFLICT (application_id, item) DO NOTHING`,
+              [appId, itemName]
+            );
+          }
         }
-      }
 
-      const insertSig = db.prepare(
-        `INSERT OR IGNORE INTO franchisee_signatures (application_id, role, printed_name, signature_image, signed_by_user_id)
-         VALUES (?, ?, ?, ?, ?)`
-      );
-      insertSig.run(
-        appId,
-        'sales_agent',
-        'Maria Santos',
-        buildSignatureSvgDataUrl('Maria Santos'),
-        ids.agentUserId
-      );
+        const insertSigSql = `
+          INSERT INTO franchisee_signatures (application_id, role, printed_name, signature_image, signed_by_user_id)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (application_id, role) DO NOTHING
+        `;
 
-      if (appStatus === 'Active') {
-        insertSig.run(
+        await db.execute(insertSigSql, [
           appId,
-          'customer',
-          fr.owner_name,
-          buildSignatureSvgDataUrl(fr.owner_name),
-          fr.user_id
-        );
-        insertSig.run(
-          appId,
-          'delivery_team',
-          deliveryTeamName,
-          buildSignatureSvgDataUrl('JCDL Delivery Team'),
-          ids.deliveryUserId
-        );
-        insertSig.run(
-          appId,
-          'driver',
-          driverName,
-          buildSignatureSvgDataUrl('Carlo Mendoza'),
-          ids.deliveryUserId
-        );
-        insertSig.run(
-          appId,
-          'collector',
-          collectorName,
-          buildSignatureSvgDataUrl(collectorName),
-          ids.adminUserId
-        );
-        insertSig.run(
-          appId,
-          'noted_by',
-          notedByName,
-          buildSignatureSvgDataUrl('Ricardo Morales'),
-          ids.adminUserId
-        );
-      } else if (appStatus === 'For Delivery') {
-        insertSig.run(
-          appId,
-          'noted_by',
-          notedByName,
-          buildSignatureSvgDataUrl('Ricardo Morales'),
-          ids.adminUserId
-        );
+          'sales_agent',
+          'Maria Santos',
+          buildSignatureSvgDataUrl('Maria Santos'),
+          ids.agentUserId,
+        ]);
+
+        if (appStatus === 'Active') {
+          await db.execute(insertSigSql, [
+            appId,
+            'customer',
+            fr.owner_name,
+            buildSignatureSvgDataUrl(fr.owner_name),
+            fr.user_id,
+          ]);
+          await db.execute(insertSigSql, [
+            appId,
+            'delivery_team',
+            deliveryTeamName,
+            buildSignatureSvgDataUrl('JCDL Delivery Team'),
+            ids.deliveryUserId,
+          ]);
+          await db.execute(insertSigSql, [
+            appId,
+            'driver',
+            driverName,
+            buildSignatureSvgDataUrl('Carlo Mendoza'),
+            ids.deliveryUserId,
+          ]);
+          await db.execute(insertSigSql, [
+            appId,
+            'collector',
+            collectorName,
+            buildSignatureSvgDataUrl(collectorName),
+            ids.adminUserId,
+          ]);
+          await db.execute(insertSigSql, [
+            appId,
+            'noted_by',
+            notedByName,
+            buildSignatureSvgDataUrl('Ricardo Morales'),
+            ids.adminUserId,
+          ]);
+        } else if (appStatus === 'For Delivery') {
+          await db.execute(insertSigSql, [
+            appId,
+            'noted_by',
+            notedByName,
+            buildSignatureSvgDataUrl('Ricardo Morales'),
+            ids.adminUserId,
+          ]);
+        }
       }
     }
   }
 
-  // Ensure every store in franchisees has a store_code
   const deterministicCodesByUsername: Record<string, string> = {
     franchisee_test: 'notredame-a8f3k9m2',
     franchisee_pending_test: 'awang-p4x7n2q8',
@@ -436,18 +420,14 @@ export function ensureFranchiseeApplicationsAndCodes(
     franchisee_approved_test: 'sinsuat-m5r2t8z6',
   };
 
-  const storesForCodes = db
-    .prepare(
-      `SELECT f.id, f.store_name, f.store_code, u.username
-       FROM franchisees f
-       JOIN users u ON u.id = f.user_id`
-    )
-    .all() as any[];
+  const storesForCodes = await db.queryAll<any>(
+    `SELECT f.id, f.store_name, f.store_code, u.username
+     FROM franchisees f
+     JOIN users u ON u.id = f.user_id`
+  );
 
   for (const st of storesForCodes) {
-    let code =
-      st.store_code ||
-      deterministicCodesByUsername[st.username];
+    let code = st.store_code || deterministicCodesByUsername[st.username];
     if (!code) {
       const slug = String(st.store_name || 'store')
         .toLowerCase()
@@ -459,11 +439,15 @@ export function ensureFranchiseeApplicationsAndCodes(
       code = `${slug || 'st'}-${token}`;
     }
 
-    db.prepare(
-      "UPDATE franchisees SET store_code = ? WHERE id = ? AND (store_code IS NULL OR store_code = '')"
-    ).run(code, st.id);
-    db.prepare(
-      "UPDATE franchisee_applications SET store_code = ? WHERE franchisee_id = ? AND (store_code IS NULL OR store_code = '')"
-    ).run(code, st.id);
+    await db.execute(
+      `UPDATE franchisees SET store_code = $1
+       WHERE id = $2 AND (store_code IS NULL OR store_code = '')`,
+      [code, st.id]
+    );
+    await db.execute(
+      `UPDATE franchisee_applications SET store_code = $1
+       WHERE franchisee_id = $2 AND (store_code IS NULL OR store_code = '')`,
+      [code, st.id]
+    );
   }
 }

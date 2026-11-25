@@ -32,6 +32,17 @@ export interface Pagination {
   totalPages: number;
 }
 
+export type StockStatusLabel = 'In Stock' | 'Low Stock' | 'No Stock';
+
+export interface ActiveRestockSummary {
+  request_id: number;
+  request_number: string;
+  status: string;
+  priority: string;
+  expected_arrival_date: string | null;
+  approved_qty: number;
+}
+
 export interface Product {
   id: number;
   category_id: number;
@@ -42,9 +53,23 @@ export interface Product {
   size: string;
   price: number;
   low_stock_threshold: number;
+  target_quantity?: number;
+  safety_stock?: number;
+  max_reservation_qty?: number | null;
   image_url: string | null;
   is_active: number;
   stock_qty?: number;
+  physical_stock?: number;
+  reserved_stock?: number;
+  available_stock?: number;
+  reorder_point?: number;
+  stock_status?: StockStatusLabel;
+  recommendation_label?: string | null;
+  active_restock?: ActiveRestockSummary | null;
+  franchisee_availability?: {
+    blocked: boolean;
+    message: string;
+  };
 }
 
 export interface Warehouse {
@@ -55,5 +80,6 @@ export interface Warehouse {
   contact_number: string;
   lat: number;
   lng: number;
+  capacity_limit?: number;
   is_active: number;
 }

@@ -1245,6 +1245,7 @@ export function resolveNotificationTargetRoute(
   if (role === 'admin') {
     if (t === 'approval') return { path: '/admin/pending-franchisees' };
     if (t === 'order' || t === 'delivery' || t === 'near') return { path: '/admin/orders' };
+    if (t === 'restock' || t === 'restock_urgent') return { path: '/admin/restocking' };
     if (t === 'low_stock') return { path: '/admin/inventory' };
     if (t === 'promo') return { path: '/admin/promotions' };
     if (t === 'commission') return { path: '/admin/commissions' };
@@ -1259,7 +1260,7 @@ export function resolveNotificationTargetRoute(
   }
 
   if (role === 'franchisee') {
-    if (t === 'promo') return { path: '/franchisee/catalog' };
+    if (t === 'promo' || t === 'restock') return { path: '/franchisee/catalog' };
     if (t === 'order' || t === 'delivery' || t === 'near') {
       return {
         path: '/franchisee/orders',
@@ -1292,6 +1293,7 @@ export function getNotificationTypesForRoute(
     if (path === '/admin/pending-franchisees') return ['approval'];
     if (path === '/admin/orders' || path === '/admin/track-order')
       return ['order', 'delivery', 'near'];
+    if (path === '/admin/restocking') return ['restock', 'restock_urgent'];
     if (path === '/admin/inventory') return ['low_stock'];
     if (path === '/admin/promotions') return ['promo'];
     if (path === '/admin/commissions') return ['commission'];
@@ -1306,7 +1308,7 @@ export function getNotificationTypesForRoute(
   if (role === 'franchisee') {
     if (path === '/franchisee/orders' || path === '/franchisee/track-order')
       return ['order', 'delivery', 'near'];
-    if (path === '/franchisee/catalog') return ['promo'];
+    if (path === '/franchisee/catalog') return ['promo', 'restock'];
     return [];
   }
   if (role === 'delivery') {
@@ -1337,6 +1339,9 @@ export function getSidebarBadgeCount(
     }
     if (itemPath === '/admin/orders') {
       return Number(sections.replenishment_orders ?? sections['/admin/orders'] ?? 0);
+    }
+    if (itemPath === '/admin/restocking') {
+      return Number(sections.warehouse_restocking ?? sections['/admin/restocking'] ?? 0);
     }
     if (itemPath === '/admin/inventory') {
       return Number(sections.warehouse_inventory ?? sections['/admin/inventory'] ?? 0);

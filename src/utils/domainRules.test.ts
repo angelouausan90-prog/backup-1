@@ -387,16 +387,20 @@ test('formatBadgeCount, formatRelativeTimeAgo, resolveNotificationTargetRoute, a
   // Route target resolution per role & notification type
   assert.equal(resolveNotificationTargetRoute('admin', 'approval', 5).path, '/admin/pending-franchisees');
   assert.equal(resolveNotificationTargetRoute('admin', 'order', 12).path, '/admin/orders');
+  assert.equal(resolveNotificationTargetRoute('admin', 'restock', 4).path, '/admin/restocking');
+  assert.equal(resolveNotificationTargetRoute('admin', 'restock_urgent', 4).path, '/admin/restocking');
   assert.equal(resolveNotificationTargetRoute('admin', 'low_stock', 3).path, '/admin/inventory');
   assert.equal(resolveNotificationTargetRoute('agent', 'approval', 5).path, '/agent/dashboard');
   assert.equal(resolveNotificationTargetRoute('franchisee', 'promo', 9).path, '/franchisee/catalog');
+  assert.equal(resolveNotificationTargetRoute('franchisee', 'restock', 9).path, '/franchisee/catalog');
   assert.equal(resolveNotificationTargetRoute('franchisee', 'order', 18).path, '/franchisee/orders');
   assert.equal(resolveNotificationTargetRoute('delivery', 'delivery', 7).path, '/delivery/dashboard');
 
   // Route -> notification types to mark read on open
   assert.deepEqual(getNotificationTypesForRoute('admin', '/admin/pending-franchisees'), ['approval']);
+  assert.deepEqual(getNotificationTypesForRoute('admin', '/admin/restocking'), ['restock', 'restock_urgent']);
   assert.deepEqual(getNotificationTypesForRoute('agent', '/agent/dashboard'), ['approval']);
-  assert.deepEqual(getNotificationTypesForRoute('franchisee', '/franchisee/catalog'), ['promo']);
+  assert.deepEqual(getNotificationTypesForRoute('franchisee', '/franchisee/catalog'), ['promo', 'restock']);
   assert.deepEqual(getNotificationTypesForRoute('franchisee', '/franchisee/orders'), ['order', 'delivery', 'near']);
   assert.deepEqual(getNotificationTypesForRoute('delivery', '/delivery/dashboard'), ['delivery', 'order', 'near']);
   assert.deepEqual(getNotificationTypesForRoute('admin', '/admin/notifications'), ['*']);
@@ -408,11 +412,13 @@ test('formatBadgeCount, formatRelativeTimeAgo, resolveNotificationTargetRoute, a
       pending_approvals: 2,
       replenishment_orders: 5,
       warehouse_inventory: 11,
+      warehouse_restocking: 3,
     },
   };
   assert.equal(getSidebarBadgeCount('admin', '/admin/pending-franchisees', adminSummary), 2);
   assert.equal(getSidebarBadgeCount('admin', '/admin/orders', adminSummary), 5);
   assert.equal(getSidebarBadgeCount('admin', '/admin/inventory', adminSummary), 11);
+  assert.equal(getSidebarBadgeCount('admin', '/admin/restocking', adminSummary), 3);
   assert.equal(getSidebarBadgeCount('admin', '/admin/notifications', adminSummary), 4);
   assert.equal(getSidebarBadgeCount('admin', '/admin/dashboard', adminSummary), 0);
 });

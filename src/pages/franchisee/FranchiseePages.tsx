@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { api } from '../../services/api';
-import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
+import { PaginationBar, ProductImage, StatusText, StockStatusBadge } from '../../components/SharedUI';
 import {
   ORDER_TIMELINE_STEPS,
   getTimelineStepIndex,
 } from '../../utils/domainRules';
+import { getFranchiseeStockMessage } from '../../utils/restockingRules';
 import {
   ApplicationStatusBadge,
   ApplicationWorkflowTimeline,
@@ -357,10 +358,40 @@ export const CatalogAndCartView: React.FC<{
       .catch(() => setPromoEvaluation(null));
   }, [cart]);
 
+  const getEffectiveMaxQty = (product: any) => {
+    const avail = Number(product.available_stock ?? product.stock_qty ?? 0);
+    const limit =
+      product.max_reservation_qty !== null && product.max_reservation_qty !== undefined
+        ? Number(product.max_reservation_qty)
+        : null;
+    if (limit !== null && limit > 0) return Math.min(avail, limit);
+    return avail;
+  };
+
   const addToCart = (product: any) => {
+    const avail = Number(product.available_stock ?? product.stock_qty ?? 0);
+    if (avail <= 0 || product.stock_status === 'No Stock') {
+      setError(
+        product.franchisee_availability?.message ||
+          `${product.name} currently has No Stock.`
+      );
+      return;
+    }
     const currentQty = cart[product.id]?.quantity || 0;
-    if (currentQty + 1 > Number(product.stock_qty || 0)) {
-      setError(`Only ${product.stock_qty} units of ${product.name} available in the selected warehouse.`);
+    const maxLimit =
+      product.max_reservation_qty !== null && product.max_reservation_qty !== undefined
+        ? Number(product.max_reservation_qty)
+        : null;
+    if (maxLimit !== null && currentQty + 1 > maxLimit) {
+      setError(
+        `Maximum reservation limit for ${product.name} is ${maxLimit} units per order.`
+      );
+      return;
+    }
+    if (currentQty + 1 > avail) {
+      setError(
+        `Low Stock. Only ${avail} unit(s) of ${product.name} available in the selected warehouse.`
+      );
       return;
     }
     setError('');
@@ -379,8 +410,20 @@ export const CatalogAndCartView: React.FC<{
       setCart(next);
       return;
     }
-    if (qty > Number(entry.product.stock_qty || 0)) {
-      setError(`Max available stock for ${entry.product.name} is ${entry.product.stock_qty}.`);
+    const avail = Number(entry.product.available_stock ?? entry.product.stock_qty ?? 0);
+    const maxLimit =
+      entry.product.max_reservation_qty !== null &&
+      entry.product.max_reservation_qty !== undefined
+        ? Number(entry.product.max_reservation_qty)
+        : null;
+    if (maxLimit !== null && qty > maxLimit) {
+      setError(
+        `Maximum reservation limit for ${entry.product.name} is ${maxLimit} units per order.`
+      );
+      return;
+    }
+    if (qty > avail) {
+      setError(`Only ${avail} available unit(s) of ${entry.product.name} left.`);
       return;
     }
     setError('');
@@ -701,16 +744,28 @@ export const CatalogAndCartView: React.FC<{
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
               {products.map((p) => {
-                const stock = Number(p.stock_qty || 0);
+                const avail = Number(p.available_stock ?? p.stock_qty ?? 0);
+                const status =
+                  p.stock_status || (avail === 0 ? 'No Stock' : 'In Stock');
+                const availability =
+                  p.franchisee_availability ||
+                  getFranchiseeStockMessage(status, avail, p.active_restock || null);
+                const isNoStock = status === 'No Stock' || Boolean(availability.blocked) || avail <= 0;
+
                 return (
                   <div
                     key={p.id}
-                    className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col justify-between space-y-3"
+                    className={`bg-white border rounded-lg p-4 flex flex-col justify-between space-y-3 ${
+                      isNoStock ? 'border-rose-200 bg-rose-50/20' : 'border-slate-200'
+                    }`}
                   >
                     <div className="space-y-2">
                       <ProductImage imageUrl={p.image_url} alt={p.name} />
-                      <div className="text-xs text-slate-500">
-                        {p.category_name} · {p.flavor} · {p.size}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs text-slate-500 truncate">
+                          {p.category_name} · {p.flavor} · {p.size}
+                        </div>
+                        <StockStatusBadge status={status} />
                       </div>
                       <h3 className="text-sm font-bold text-slate-900">{p.name}</h3>
                     </div>
@@ -720,21 +775,34 @@ export const CatalogAndCartView: React.FC<{
                         <span className="font-mono font-bold text-slate-900 text-sm">
                           PHP {Number(p.price).toFixed(2)}
                         </span>
-                        <span
-                          className={`font-mono font-medium ${
-                            stock > 0 ? 'text-emerald-700' : 'text-rose-700'
-                          }`}
-                        >
-                          {stock > 0 ? `${stock} in stock` : 'Out of stock'}
+                        <span className="font-mono text-[11px] text-slate-600">
+                          {avail} available
                         </span>
                       </div>
+
+                      {status === 'No Stock' && (
+                        <div className="p-2 rounded-md border border-rose-200 bg-rose-50 text-[11px] font-semibold text-rose-800">
+                          {availability.message}
+                        </div>
+                      )}
+                      {status === 'Low Stock' && (
+                        <div className="p-2 rounded-md border border-orange-200 bg-orange-50 text-[11px] font-semibold text-orange-800">
+                          {availability.message}
+                        </div>
+                      )}
+                      {p.max_reservation_qty && !isNoStock && (
+                        <div className="text-[11px] text-slate-500">
+                          Limit: max {p.max_reservation_qty} units per order
+                        </div>
+                      )}
+
                       <button
                         type="button"
-                        disabled={stock <= 0}
+                        disabled={isNoStock}
                         onClick={() => addToCart(p)}
-                        className="w-full py-2 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-40"
+                        className="w-full py-2 px-3 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed"
                       >
-                        {stock > 0 ? 'Add to Replenishment Cart' : 'Unavailable'}
+                        {isNoStock ? 'No Stock' : `Add ${p.name} to Cart`}
                       </button>
                     </div>
                   </div>
@@ -786,7 +854,7 @@ export const CatalogAndCartView: React.FC<{
                   <input
                     type="number"
                     min={0}
-                    max={product.stock_qty}
+                    max={getEffectiveMaxQty(product)}
                     aria-label={`Quantity for ${product.name}`}
                     value={quantity}
                     onChange={(e) =>

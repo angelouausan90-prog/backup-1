@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
-import { PaginationBar, ProductImage, StatusText } from '../../components/SharedUI';
+import { PaginationBar, ProductImage, StatusText, StockStatusBadge } from '../../components/SharedUI';
 import {
   formatPromoHowItWorks,
   validatePromoPayload,
@@ -489,11 +489,14 @@ export const ProductsManagementView: React.FC = () => {
   );
 };
 
-// ===== 8. WAREHOUSE INVENTORY (Stock-In, Adjustments, Low-Stock Alerts) =====
-export const InventoryManagementView: React.FC = () => {
+// ===== 8. WAREHOUSE INVENTORY (Stock-In, Adjustments, Stock Status & Capacity) =====
+export const InventoryManagementView: React.FC<{
+  onOpenRestock?: (requestId?: number | null) => void;
+}> = ({ onOpenRestock }) => {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [selectedWh, setSelectedWh] = useState<string>('');
   const [rows, setRows] = useState<any[]>([]);
+  const [whOverview, setWhOverview] = useState<any>(null);
   const [movements, setMovements] = useState<any[]>([]);
   const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
   const [search, setSearch] = useState('');
@@ -518,6 +521,7 @@ export const InventoryManagementView: React.FC = () => {
       )
       .then((res) => {
         setRows(res.data);
+        setWhOverview(res.warehouse_overview || null);
         setPagination(res.pagination);
       });
     api.get(`/inventory/movements?warehouse_id=${selectedWh}&limit=8`).then((res) => {
@@ -558,29 +562,69 @@ export const InventoryManagementView: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">Warehouse Inventory & Stock Movements</h1>
+          <h1 className="text-xl font-bold text-slate-900">Warehouse Inventory &amp; Stock Movements</h1>
           <p className="text-sm text-slate-600">
-            Perform stock-in, manual stock adjustments, and monitor low-stock thresholds per warehouse.
+            Monitor physical, reserved, and available stock against reorder points and warehouse capacity.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor="wh-select" className="text-xs font-semibold text-slate-700">
-            Warehouse:
-          </label>
-          <select
-            id="wh-select"
-            value={selectedWh}
-            onChange={(e) => setSelectedWh(e.target.value)}
-            className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm bg-white font-medium"
-          >
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <label htmlFor="wh-select" className="text-xs font-semibold text-slate-700">
+              Warehouse:
+            </label>
+            <select
+              id="wh-select"
+              value={selectedWh}
+              onChange={(e) => setSelectedWh(e.target.value)}
+              className="px-3 py-1.5 rounded-lg border border-slate-300 text-sm bg-white font-medium"
+            >
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {onOpenRestock && (
+            <button
+              type="button"
+              onClick={() => onOpenRestock(null)}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700 whitespace-nowrap"
+            >
+              Warehouse Restocking
+            </button>
+          )}
         </div>
       </div>
+
+      {whOverview && (
+        <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
+          <div className="flex flex-wrap items-center gap-5">
+            <div>
+              <span className="text-slate-500">Physical Stock / Capacity: </span>
+              <strong className="font-mono text-slate-900">
+                {whOverview.total_physical_stock} / {whOverview.capacity_limit} units
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500">Space Remaining: </span>
+              <strong className="font-mono text-emerald-700">
+                {whOverview.remaining_capacity} units
+              </strong>
+            </div>
+            <div>
+              <span className="text-slate-500">Delivery Lead Time: </span>
+              <strong className="font-mono text-slate-900">{whOverview.lead_time_days} days</strong>
+            </div>
+          </div>
+          {whOverview.targets_exceed_capacity && (
+            <span className="text-amber-800 font-semibold">
+              Warning: Combined targets ({whOverview.total_target_qty ?? whOverview.total_targets}) exceed capacity by{' '}
+              {whOverview.targets_excess} units
+            </span>
+          )}
+        </div>
+      )}
 
       {message && (
         <div className="p-4 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-900">
@@ -610,7 +654,7 @@ export const InventoryManagementView: React.FC = () => {
               onChange={(e) => setLowOnly(e.target.checked)}
               className="rounded border-slate-300"
             />
-            Show Low-Stock Items Only
+            Show Low Stock &amp; No Stock Only
           </label>
         </div>
 
@@ -619,10 +663,10 @@ export const InventoryManagementView: React.FC = () => {
             <thead>
               <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500">
                 <th className="py-2.5 pr-4">Photo</th>
-                <th className="py-2.5 pr-4">Product & SKU</th>
-                <th className="py-2.5 pr-4 text-right">On-Hand Qty</th>
-                <th className="py-2.5 pr-4 text-right">Threshold</th>
-                <th className="py-2.5 pr-4">Alert</th>
+                <th className="py-2.5 pr-4">Product &amp; SKU</th>
+                <th className="py-2.5 pr-4 text-right">Available (Phys − Res)</th>
+                <th className="py-2.5 pr-4 text-right">Target / Reorder Pt</th>
+                <th className="py-2.5 pr-4">Stock Status</th>
                 <th className="py-2.5 text-right">Stock-In / Adjustment</th>
               </tr>
             </thead>
@@ -630,70 +674,114 @@ export const InventoryManagementView: React.FC = () => {
               {rows.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-6 text-center text-sm text-slate-500">
-                    No products found. Add products on the Products & Categories page first.
+                    No products found. Add products on the Products &amp; Categories page first.
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => (
-                  <tr key={r.product_id} className="hover:bg-slate-50">
-                    <td className="py-2.5 pr-4">
-                      <ProductImage imageUrl={r.image_url} alt={r.name} thumb />
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <div className="font-semibold text-slate-900">{r.name}</div>
-                      <div className="text-xs font-mono text-slate-500">
-                        {r.sku} · {r.flavor} ({r.size})
-                      </div>
-                    </td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-sm font-bold text-slate-900">
-                      {r.quantity}
-                    </td>
-                    <td className="py-2.5 pr-4 text-right font-mono text-xs text-slate-500">
-                      {r.low_stock_threshold}
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <StatusText status={r.is_low_stock ? 'LOW' : 'OK'} />
-                    </td>
-                    <td className="py-2.5 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <input
-                          type="number"
-                          aria-label={`Quantity change for ${r.name}`}
-                          placeholder="+/- Qty"
-                          value={qtyInput[r.product_id] || ''}
-                          onChange={(e) =>
-                            setQtyInput({ ...qtyInput, [r.product_id]: e.target.value })
-                          }
-                          className="w-20 px-2 py-1 rounded border border-slate-300 text-xs font-mono"
-                        />
-                        <input
-                          type="text"
-                          aria-label={`Movement notes for ${r.name}`}
-                          placeholder="Reason / batch..."
-                          value={notesInput[r.product_id] || ''}
-                          onChange={(e) =>
-                            setNotesInput({ ...notesInput, [r.product_id]: e.target.value })
-                          }
-                          className="w-32 px-2 py-1 rounded border border-slate-300 text-xs"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => recordMovement(r.product_id, 'STOCK_IN')}
-                          className="px-2.5 py-1 rounded bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 whitespace-nowrap shrink-0"
-                        >
-                          Stock-In
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => recordMovement(r.product_id, 'ADJUSTMENT')}
-                          className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
-                        >
-                          Adjust
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                rows.map((r) => {
+                  const enteredDelta = parseInt(qtyInput[r.product_id] || '0', 10) || 0;
+                  const willExceedCapacity =
+                    Boolean(whOverview) &&
+                    enteredDelta > 0 &&
+                    Number(whOverview.total_physical_stock || 0) + enteredDelta >
+                      Number(whOverview.capacity_limit || 0);
+
+                  return (
+                    <tr key={r.product_id} className="hover:bg-slate-50">
+                      <td className="py-2.5 pr-4">
+                        <ProductImage imageUrl={r.image_url} alt={r.name} thumb />
+                      </td>
+                      <td className="py-2.5 pr-4">
+                        <div className="font-semibold text-slate-900">{r.name}</div>
+                        <div className="text-xs font-mono text-slate-500">
+                          {r.sku} · {r.flavor} ({r.size})
+                        </div>
+                      </td>
+                      <td className="py-2.5 pr-4 text-right font-mono">
+                        <div className="text-sm font-bold text-slate-900">
+                          {r.available_stock ?? r.quantity}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          {r.physical_stock ?? r.quantity} phys − {r.reserved_stock ?? 0} res
+                        </div>
+                      </td>
+                      <td className="py-2.5 pr-4 text-right font-mono text-xs text-slate-600">
+                        <div>Target {r.target_quantity ?? 100}</div>
+                        <div className="text-[11px] text-slate-500">
+                          RP {r.reorder_point ?? r.low_stock_threshold}
+                        </div>
+                      </td>
+                      <td className="py-2.5 pr-4 space-y-1">
+                        <StockStatusBadge status={r.stock_status || 'In Stock'} />
+                        {r.recommendation_label && (
+                          <div
+                            className={`text-[11px] font-semibold ${
+                              r.stock_status === 'No Stock' ? 'text-rose-700' : 'text-orange-700'
+                            }`}
+                          >
+                            {r.recommendation_label}
+                          </div>
+                        )}
+                        {r.active_restock && onOpenRestock && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onOpenRestock(r.active_restock.id ?? r.active_restock.request_id)
+                            }
+                            className="block text-[11px] font-mono text-blue-700 hover:underline"
+                          >
+                            {r.active_restock.request_number} ({r.active_restock.status})
+                          </button>
+                        )}
+                      </td>
+                      <td className="py-2.5 text-right">
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="flex items-center justify-end gap-2">
+                            <input
+                              type="number"
+                              aria-label={`Quantity change for ${r.name}`}
+                              placeholder="+/- Qty"
+                              value={qtyInput[r.product_id] || ''}
+                              onChange={(e) =>
+                                setQtyInput({ ...qtyInput, [r.product_id]: e.target.value })
+                              }
+                              className="w-20 px-2 py-1 rounded border border-slate-300 text-xs font-mono"
+                            />
+                            <input
+                              type="text"
+                              aria-label={`Movement notes for ${r.name}`}
+                              placeholder="Reason / batch..."
+                              value={notesInput[r.product_id] || ''}
+                              onChange={(e) =>
+                                setNotesInput({ ...notesInput, [r.product_id]: e.target.value })
+                              }
+                              className="w-32 px-2 py-1 rounded border border-slate-300 text-xs"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => recordMovement(r.product_id, 'STOCK_IN')}
+                              className="px-2.5 py-1 rounded bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 whitespace-nowrap shrink-0"
+                            >
+                              Stock-In
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => recordMovement(r.product_id, 'ADJUSTMENT')}
+                              className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                            >
+                              Adjust
+                            </button>
+                          </div>
+                          {willExceedCapacity && (
+                            <span className="text-[11px] font-semibold text-rose-700">
+                              Exceeds warehouse capacity ({whOverview.capacity_limit})
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -1301,14 +1389,15 @@ export const ReportsAndLogsView: React.FC = () => {
     doc.text('AICE Franchisee Hub — Warehouse Inventory Report', 14, 16);
     autoTable(doc, {
       startY: 22,
-      head: [['Warehouse', 'SKU', 'Product', 'Flavor', 'Size', 'Qty', 'Status']],
+      head: [['Warehouse', 'SKU', 'Product', 'Physical', 'Reserved', 'Available', 'Reorder Pt', 'Status']],
       body: invReport.map((i) => [
         i.warehouse_name,
         i.sku,
         i.product_name,
-        i.flavor,
-        i.size,
-        i.quantity,
+        i.physical_stock ?? i.quantity,
+        i.reserved_stock ?? 0,
+        i.available_stock ?? i.quantity,
+        i.reorder_point ?? i.low_stock_threshold,
         i.stock_status,
       ]),
     });
@@ -1436,7 +1525,7 @@ export const ReportsAndLogsView: React.FC = () => {
                 <tr className="border-b border-slate-200 font-semibold text-slate-500">
                   <th className="py-2 pr-3">Warehouse</th>
                   <th className="py-2 pr-3">Product</th>
-                  <th className="py-2 pr-3 text-right">Qty</th>
+                  <th className="py-2 pr-3 text-right">Available</th>
                   <th className="py-2 text-right">Status</th>
                 </tr>
               </thead>
@@ -1452,9 +1541,11 @@ export const ReportsAndLogsView: React.FC = () => {
                     <tr key={idx}>
                       <td className="py-2 pr-3">{i.warehouse_name}</td>
                       <td className="py-2 pr-3 font-medium">{i.product_name}</td>
-                      <td className="py-2 pr-3 text-right font-mono">{i.quantity}</td>
+                      <td className="py-2 pr-3 text-right font-mono">
+                        {i.available_stock ?? i.quantity}
+                      </td>
                       <td className="py-2 text-right">
-                        <StatusText status={i.stock_status} />
+                        <StockStatusBadge status={i.stock_status} />
                       </td>
                     </tr>
                   ))
@@ -2179,14 +2270,17 @@ export const DemandForecastingView: React.FC<{ embedded?: boolean }> = ({ embedd
                     <td className="py-2.5 pr-3 text-right font-mono tabular-nums font-bold text-amber-800">
                       {r.recommended_restock > 0 ? `+${r.recommended_restock} boxes` : '0 (Covered)'}
                     </td>
-                    <td className="py-2.5 text-right font-mono font-semibold">
-                      {r.risk_level === 'CRITICAL' ? (
-                        <span className="text-rose-700">● CRITICAL</span>
-                      ) : r.risk_level === 'RESTOCK_SOON' ? (
-                        <span className="text-amber-700">● RESTOCK SOON</span>
-                      ) : (
-                        <span className="text-emerald-700">● HEALTHY</span>
-                      )}
+                    <td className="py-2.5 text-right">
+                      <StockStatusBadge
+                        status={
+                          r.stock_status ||
+                          (Number(r.available_stock ?? r.current_stock ?? 0) === 0
+                            ? 'No Stock'
+                            : r.risk_level === 'CRITICAL' || r.risk_level === 'RESTOCK_SOON'
+                            ? 'Low Stock'
+                            : 'In Stock')
+                        }
+                      />
                     </td>
                   </tr>
                 ))
